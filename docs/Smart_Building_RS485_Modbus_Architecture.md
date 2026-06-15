@@ -230,6 +230,11 @@ For a known slave, recovery restores both transport identity and master-owned ro
 
 # 8. Pairing Flow
 
+For the easier operational explanation of all three field scenarios and their
+actual firmware timing, use:
+
+`RS485_Master_Discovery_Recovery_Flow_ID.md`
+
 Startup reconnect flow:
 
 1. START.
@@ -627,7 +632,21 @@ Retry count:                      1
 Offline timeout:              5000 ms
 Degraded fail threshold:          3 consecutive failures
 Offline fail threshold:           5 consecutive failures
+Auto-recovery interval:          10000 ms per saved slave
+RS485 task loop interval:           10 ms
 ```
+
+Timing interpretation:
+
+- One `1000 ms` polling interval advances one saved registry entry; it does not
+  poll every slave simultaneously.
+- A slave is normally revisited after approximately
+  `saved registry entry count x 1000 ms`.
+- Failed thresholds count each Modbus attempt. With one configured retry, one
+  fully failed transaction can contribute two failed attempts.
+- A powered slave that only loses its RS485 cable remains on its assigned
+  address and reconnects through normal polling. Address-247 recovery is mainly
+  needed after a known RAM-only slave reboots.
 
 ---
 

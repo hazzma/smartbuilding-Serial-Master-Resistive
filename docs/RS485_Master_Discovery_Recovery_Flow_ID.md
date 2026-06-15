@@ -67,6 +67,7 @@ Untuk known slave, master juga mengingat profile dan sensor assignment terakhir.
 
 | Timing | Nilai | Dipakai untuk |
 |---|---:|---|
+| RS485 task loop | `10 ms` | Memproses request, pairing, command, dan scheduler polling |
 | Modbus timeout per attempt | `100 ms` | Tunggu respons tiap request |
 | Retry | `1` | Total request = 2 attempt |
 | Normal polling tick | `1000 ms` | Tiap 1 detik master proses 1 slave registry |
@@ -75,8 +76,107 @@ Untuk known slave, master juga mengingat profile dan sensor assignment terakhir.
 | Identity refresh | `10000 ms` | Refresh identity known slave |
 | Capability refresh | `5000 ms` | Refresh capability/assignment known slave |
 | Offline timeout | `5000 ms` | Kalau last_seen lewat ini, slave dianggap offline |
+| Degraded threshold | `3 failed attempt` | Menandai komunikasi mulai bermasalah |
+| Offline fail threshold | `5 failed attempt` | Menandai slave offline |
 | Discover timeout | `30000 ms` | Discover berhenti sendiri |
 | Auto recovery interval | `10000 ms` | Recovery known slave diulang tiap 10 detik per slave |
+
+Catatan cara membaca timing:
+
+- Tick `1000 ms` memproses **satu entry registry**, bukan semua slave sekaligus.
+  Jika ada `N` entry, slave yang sama normalnya mendapat giliran lagi sekitar
+  `N x 1 detik`.
+- Threshold degraded/offline menghitung **failed attempt**, bukan jumlah tick.
+  Karena satu transaksi memiliki satu retry, transaksi yang gagal penuh dapat
+  menambah dua failed attempt.
+- Satu transaksi yang tidak mendapat respons dapat memakan sekitar `200 ms`
+  dari dua attempt dengan timeout `100 ms`, belum termasuk overhead bus.
+
+## Tiga Skenario Lapangan
+
+### 1. Master dan Slave Pertama Kali Hidup
+
+```text
+Master belum punya saved registry
+Slave baru boot dan menunggu di address 247
+  |
+  v
+Master tidak auto-discover dan tetap idle
+  |
+  v
+User klik Discover
+  |
+  v
+Master scan tiap 700 ms, maksimal 30 detik
+  |
+  v
+Master baca MAC/capability, user pilih profile
+  |
+  v
+Master tulis assignment dan address 2..246
+  |
+  v
+Master simpan registry lalu polling normal
+```
+
+Discovery wajib dipicu user karena master tidak boleh otomatis mendaftarkan
+unknown slave.
+
+### 2. Master dan Known Slave Pernah Terhubung, Lalu Keduanya Mati
+
+```text
+Master boot dan load MAC/address/profile dari NVS
+Slave reboot dan kembali ke address 247 karena RAM-only
+  |
+  v
+Pada giliran registry pertama, master kirim recovery MAC + saved address ke 247
+  |
+  v
+Slave dengan MAC cocok pindah ke saved address
+  |
+  v
+Master confirm identity pada saved address
+  |
+  v
+Master restore assignment/profile lalu poll sensor
+```
+
+Dengan satu slave, recovery pertama biasanya dimulai sekitar slot polling
+pertama, yaitu sekitar `1 detik` setelah task RS485 berjalan. Dengan beberapa
+entry, recovery dilakukan bergiliran satu entry per detik. Jika gagal, recovery
+slave yang sama dibatasi minimal setiap `10 detik`.
+
+### 3. Kabel RS485 Dicabut dan Dipasang Lagi, Power Master/Slave Tetap Hidup
+
+Slave tidak reboot, sehingga slave **tetap memakai saved assigned address** dan
+tidak kembali ke `247`.
+
+```text
+Kabel dicabut
+  |
+  v
+Master tetap poll assigned address + satu retry
+  |
+  v
+Failed attempt naik, slave dapat menjadi degraded/offline
+  |
+  v
+Master sesekali mencoba recovery ke 247, tetapi gagal karena slave masih di
+assigned address
+  |
+  v
+Kabel dipasang lagi
+  |
+  v
+Polling assigned address berikutnya berhasil
+  |
+  v
+Master clear consecutive_fail dan slave kembali online
+```
+
+Kasus ini tidak membutuhkan Discover atau pairing ulang. Waktu reconnect setelah
+kabel dipasang kembali secara nominal sekitar `1 detik` untuk satu entry, atau
+hingga sekitar `jumlah entry x 1 detik` sebelum slave mendapat giliran lagi.
 
 ## Flow Normal Boot
 

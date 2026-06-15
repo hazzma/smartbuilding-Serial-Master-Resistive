@@ -24,6 +24,8 @@ static uint8_t debug_line_len = 0;
 
 static const uint32_t RS485_RESPONSE_TIMEOUT_MS = 100;
 static const uint8_t RS485_RETRY_COUNT = 1;
+// One poll interval advances one registry slot, not every slave at once.
+// Failed-attempt thresholds count both the initial request and its retry.
 static const uint32_t RS485_POLL_INTERVAL_MS = 1000;
 static const uint32_t RS485_PAIRING_SCAN_INTERVAL_MS = 700;
 static const uint32_t RS485_PAIRING_KNOWN_SCAN_WINDOW_MS = 4000;
@@ -31,6 +33,8 @@ static const uint32_t RS485_IDENTITY_SYNC_INTERVAL_MS = 10000;
 static const uint32_t RS485_CAPABILITY_SYNC_INTERVAL_MS = 5000;
 static const uint32_t RS485_OFFLINE_TIMEOUT_MS = 5000;
 static const uint32_t RS485_PAIRING_TIMEOUT_MS = 30000;
+// Recovery is rate-limited per saved slave. Normal assigned-address polling
+// continues between recovery attempts, so a powered slave reconnects normally.
 static const uint32_t RS485_AUTO_RECOVERY_INTERVAL_MS = 10000;
 static const uint8_t RS485_DEGRADED_THRESHOLD = 3;
 static const uint8_t RS485_OFFLINE_FAIL_THRESHOLD = 5;

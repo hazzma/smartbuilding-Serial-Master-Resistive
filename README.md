@@ -11,7 +11,7 @@ The firmware targets an ESP32-S3 N16R8 board with a 3.5 inch ILI9488 serial SPI 
 - Publishes each sensor data type to its own MQTT topic for a Flutter app.
 - Receives MQTT control commands for LED, AC, and projector topics.
 - Talks to distributed slave nodes over RS485 Modbus RTU.
-- Reconnects saved slaves first; discovery/pairing at Modbus address `247` is only needed for new or recovered slaves.
+- Reconnects saved slaves automatically; user discovery/pairing at Modbus address `247` is only needed for unknown/new slaves.
 - Stores master-owned slave names, slave assignment, and dashboard mapping.
 - Uses Firmware V2.1 slave rules: the master assigns a Device Profile while the slave stays policy-blind.
 - Maps raw slave data into logical dashboard slots such as temperature, CO2, presence, Lux, LED, AC, and projector.
@@ -354,6 +354,11 @@ The current agreed slave wire contract is:
 
 `docs/From_SLave/RS485_Modbus_Slave_Firmware_Contract v2.md`
 
+For an easier explanation of first-time discovery, reboot recovery, powered
+cable reconnect, and every active delay/timeout, read:
+
+`docs/RS485_Master_Discovery_Recovery_Flow_ID.md`
+
 ```mermaid
 %% EDIT_TARGET: README.md - Connectivity Flow RS485 Modbus
 %% EDIT_PURPOSE: Document Firmware V2 saved-slave reconnect and slave pairing flow
@@ -455,6 +460,7 @@ Important docs:
 - [Functional Specification](docs/FSD_Smart_Building_Master_UPDATED.md)
 - [UI/UX Specification](docs/UIUX.md)
 - [RS485 Modbus Architecture](docs/Smart_Building_RS485_Modbus_Architecture.md)
+- [RS485 Master Discovery and Recovery Flow](docs/RS485_Master_Discovery_Recovery_Flow_ID.md)
 - [Connectivity and Dashboard Mapping](docs/Smart_Building_Connectivity_Dashboard_Mapping_Design_UPDATED.md)
 - [Flutter MQTT Requirements](docs/Flutter_App_MQTT_Requirements.md)
 - [Current Slave Contract](<docs/From_SLave/RS485_Modbus_Slave_Firmware_Contract v2.md>)
