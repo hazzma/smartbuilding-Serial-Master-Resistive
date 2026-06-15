@@ -4,6 +4,7 @@ Use these documents as the current source of truth for Smart Building Firmware V
 
 - `FSD_Smart_Building_Master_UPDATED.md` - system requirements, Firmware V2 behavior, and implementation impact notes.
 - `UIUX.md` - dashboard, empty state, widget, Slave Manager, and touch behavior.
+- `Calibration_TC.md` - XPT2046 touch alignment measurements, deviation history, active correction anchors, and retest procedure.
 - `Smart_Building_RS485_Modbus_Architecture.md` - active RS485 Modbus architecture.
 - `Smart_Building_Connectivity_Dashboard_Mapping_Design_UPDATED.md` - Slave Manager, feature assignment, and dashboard mapping behavior.
 - `Flutter_App_MQTT_Requirements.md` - Flutter app MQTT requirements. Firmware V2 now uses per-sensor publish topics and actuator command topics; this file must stay aligned with the FSD.
@@ -16,7 +17,7 @@ Important Firmware V2 rules:
 - Discovery/pairing is for new or recovered slaves, not a mandatory assignment step on every boot.
 - MQTT publishes each data type using the exact V2.5 runtime template
   `<class_name>/data/<data_type>`, for example `HD01/data/temp` and `HD01/data/co2`.
-- Simple sensor payloads use integers. Temperature uses one integer average Celsius value. LED and projector use integer `1` or `0`. AC uses `PPTTFFSS`. Alert uses a decimal integer bitmask.
+- Simple sensor payloads use integers except temperature. Temperature uses one float average Celsius value with one decimal place and is skipped while invalid so retained last-known data is preserved. LED and projector use integer `1` or `0`. AC uses `PPTTFFSS`. Alert uses a decimal integer bitmask.
 - MQTT subscribes to actuator control topics under `<class_name>/control/...`. After the target slave confirms the new state, the master republishes the related data topic for app/server synchronization.
 - MQTT QoS/retain defaults: scalar data QoS 0 retain true; active/LWT QoS 1 retain true; actuator commands QoS 1 retain false.
 - Slave Detail selection follows the master-owned Device Profile model.

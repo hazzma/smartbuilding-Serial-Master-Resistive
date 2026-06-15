@@ -2328,6 +2328,64 @@ void screens_render(BuildingState& state, int fps) {
         case SCREEN_TEMP_DETAIL: render_temperature_detail(state); break;
         case SCREEN_DEVICE_INFO: render_device_info(state); break;
         case SCREEN_MQTT_SETUP: render_mqtt_setup(state); break;
+        case SCREEN_TOUCH_TEST: {
+            p_canvas->fillScreen(COLOR_BG_MAIN);
+            p_canvas->setTextDatum(TextDatum::TopLeft);
+            p_canvas->setTextFont(2);
+            p_canvas->setTextColor(COLOR_TEXT_MAIN);
+            p_canvas->drawString("TOUCH ALIGNMENT TEST", 12, 8);
+            p_canvas->setTextColor(COLOR_TEXT_SEC);
+            p_canvas->drawString("Coordinates shown are screen pixels only (0..479, 0..319)", 12, 28);
+
+            for (int x = 40; x < 480; x += 40) p_canvas->fillRect(x, 52, 1, 268, COLOR_CARD_BG);
+            for (int y = 80; y < 320; y += 40) p_canvas->drawFastHLine(0, y, 480, COLOR_CARD_BG);
+
+            struct TouchTarget { int x; int y; };
+            const TouchTarget targets[] = {
+                {35, 70}, {240, 70}, {445, 70},
+                {35, 180},           {445, 180},
+                {35, 290}, {240, 290}, {445, 290}
+            };
+            p_canvas->setTextFont(1);
+            p_canvas->setTextDatum(TextDatum::MiddleCenter);
+            for (const auto& target : targets) {
+                p_canvas->drawRoundRect(target.x - 7, target.y - 7, 15, 15, 7, COLOR_STAT_WARN);
+                p_canvas->drawFastHLine(target.x - 11, target.y, 23, COLOR_STAT_WARN);
+                p_canvas->fillRect(target.x, target.y - 11, 1, 23, COLOR_STAT_WARN);
+
+                char label[20];
+                snprintf(label, sizeof(label), "%d,%d", target.x, target.y);
+                int label_y = target.y < 100 ? target.y + 18 : target.y - 18;
+                p_canvas->setTextColor(COLOR_TEXT_MAIN);
+                p_canvas->drawString(label, target.x, label_y);
+            }
+            p_canvas->setTextDatum(TextDatum::TopLeft);
+
+            data_lock(state);
+            bool pressed = state.touch_pressed;
+            int tx = state.touch_x;
+            int ty = state.touch_y;
+            int lx = state.touch_last_x;
+            int ly = state.touch_last_y;
+            data_unlock(state);
+
+            char coord[40];
+            int show_x = pressed ? tx : lx;
+            int show_y = pressed ? ty : ly;
+            snprintf(coord, sizeof(coord), "X:%d Y:%d %s", show_x, show_y,
+                     pressed ? "TOUCH" : "LAST");
+            p_canvas->setTextColor(pressed ? COLOR_STAT_ON : COLOR_TEXT_SEC);
+            p_canvas->drawString(coord, 270, 8);
+
+            if (show_x >= 0 && show_x < 480 && show_y >= 0 && show_y < 320) {
+                p_canvas->drawRoundRect(show_x - 10, show_y - 10, 21, 21, 10, COLOR_STAT_ON);
+                p_canvas->drawFastHLine(show_x - 15, show_y, 31, COLOR_STAT_ON);
+                p_canvas->fillRect(show_x, show_y - 15, 1, 31, COLOR_STAT_ON);
+            }
+
+            p_canvas->setTextDatum(TextDatum::TopLeft);
+            break;
+        }
         case SCREEN_KEYBOARD:    keyboard_draw();              break;
         default: break;
     }
@@ -3467,6 +3525,7 @@ void screens_handle_touch(BuildingState& state, int tx, int ty) {
         case SCREEN_TEMP_DETAIL: handle_temperature_detail_touch(state, tx, ty); break;
         case SCREEN_DEVICE_INFO: handle_device_info_touch(state, tx, ty); break;
         case SCREEN_MQTT_SETUP: handle_mqtt_setup_touch(state, tx, ty); break;
+        case SCREEN_TOUCH_TEST: break;
         case SCREEN_KEYBOARD:    handle_keyboard_touch(state, tx, ty);    break;
         default: break;
     }

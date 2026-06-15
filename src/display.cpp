@@ -6,6 +6,10 @@ SemaphoreHandle_t bus_mutex = NULL;
 void display_init() {
     bus_mutex = xSemaphoreCreateMutex();
 
+    // GPIO46 is a boot strapping pin. Keep touch deselected before SPI init.
+    pinMode(TOUCH_CS, OUTPUT);
+    digitalWrite(TOUCH_CS, HIGH);
+
     tft.init();
     tft.setRotation(3);       // Landscape 480x320, rotated 180 deg for inverted mounting
     tft.invertDisplay(false);

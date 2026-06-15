@@ -78,13 +78,13 @@ Direction rule:
 
 Changed:
 - Each sensor data type SHALL have its own MQTT publish topic.
-- General simple sensors SHALL publish integer payloads.
+- General simple sensors SHALL publish integer payloads, except temperature.
 - LED SHALL publish an integer scalar, `1` for ON and `0` for OFF.
-- Temperature SHALL publish one integer average in Celsius, rounded from valid temperature slots.
+- Temperature SHALL publish one float average in Celsius with one decimal place, calculated from valid temperature slots.
 - AC SHALL use `PPTTFFSS` because it carries power, target temperature, fan speed, and swing.
 
 Why:
-- Simple sensors are easier to process as integer payloads.
+- Most simple sensors are easier to process as integer payloads; temperature keeps one decimal place for useful display precision.
 - Multi-position devices need structured payloads so the app can synchronize each position correctly.
 
 Implementation effect:
@@ -92,21 +92,21 @@ Implementation effect:
 - MQTT consumers must not expect one shared master state JSON as the primary data source.
 
 Payload rules:
-- Temperature: integer average Celsius, example value `27`; `-1` means no valid temperature reading.
+- Temperature: float average Celsius with one decimal place, example value `27.4`. Firmware skips publishing this topic while temperature is invalid; Alert Bit 0 indicates invalid temperature.
 - CO2: integer payload, example value `720`.
-- Lux: integer payload, example value `350`.
+- Lux: integer non-projector room-Lux payload, example value `350`. Projector-verification Lux is local-only and never published to the app.
 - Presence: integer payload, example values `0` or `1`.
 - LED: integer payload, `1` means ON and `0` means OFF.
 - Projector: integer payload, `1` means ON and `0` means OFF.
 - Alert: decimal integer bitmask.
 - Active: retained integer `1`; MQTT LWT sets retained `0` on unexpected disconnect.
-- Simple scalar sensors: integer payload unless a later spec explicitly says otherwise.
+- Simple scalar sensors: integer payload unless their specific contract says otherwise; temperature is float.
 
 MQTT delivery policy:
 
 | MQTT message type | QoS | Retain | App behavior |
 |---|---:|---|---|
-| Simple sensor publish | 0 | true | App may receive last-known integer value immediately after subscribe. |
+| Simple sensor publish | 0 | true | App may receive the last-known numeric value immediately after subscribe. |
 | LED/projector state publish | 0 | true | App should treat retained `1`/`0` as last confirmed actuator state. |
 | Temperature average publish | 0 | true | App may receive last-known average temperature immediately after subscribe. |
 | Alert publish | 0 | true | Server/app decodes decimal bitmask. |
@@ -122,25 +122,25 @@ Implementation effect: Flutter app should accept retained sensor/status messages
 ### 2.1 Temperature Publish Payload
 
 Changed:
-- Temperature is published as one integer average in Celsius.
+- Temperature is published as one float average in Celsius with one decimal place.
 
 Why:
 - The dashboard/app only needs the room-level temperature summary for MQTT, while detailed per-slot temperature stays local to the master UI.
 
 Implementation effect:
-- Flutter app or server parses `HD01/data/temp` as an integer.
-- Payload `-1` means no valid temperature slot is currently available.
+- Flutter app or server parses `HD01/data/temp` as a float/double.
+- Firmware does not overwrite the retained temperature topic while no valid temperature slot is available. The app SHALL use Alert Bit 0 to indicate the invalid condition.
 
 Example payload:
 
 ```text
-27
+27.4
 ```
 
 Parsing rules:
-- Read the whole payload as a signed integer.
-- Values `0..80` are normal Celsius display values.
-- `-1` means unavailable, stale, not installed, or no valid slots.
+- Parse the whole payload as a signed float/double.
+- Values `0.0..80.0` are normal Celsius display values.
+- The temperature topic is not updated while unavailable, stale, not installed, or no valid slots exist. Alert Bit 0 communicates the invalid condition.
 
 ### 2.2 LED Publish Payload
 
@@ -188,7 +188,7 @@ Bit assignments:
 | 3 | 8 | Human/presence sensor error / no valid presence. |
 | 4 | 16 | LED/relay error. |
 | 5 | 32 | Check projector / IR path. Projector command was sent, but Lux verification did not prove ON after retry. |
-| 6 | 64 | AC error. |
+| 6 | 64 | AC control/bus error or cooling-performance warning. |
 | 7 | 128 | After-hours empty-room active-load anomaly. Server/Flutter should phrase this as an empty-room energy anomaly, not as a sensor fault. |
 
 Example:
@@ -367,7 +367,7 @@ Settings / Device Info requirements:
 - Editing class/room name SHALL update default topic labels/templates, for example `HD01` -> `HD01/data/co2` and `LA2` -> `LA2/data/co2`.
 
 Home SHOULD show:
-- Average temperature from the integer `data/temp` topic.
+- Average temperature from the float `data/temp` topic.
 - CO2 integer value.
 - Lux integer value if available.
 - Presence integer/binary value if available.

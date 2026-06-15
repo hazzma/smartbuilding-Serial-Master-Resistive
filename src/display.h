@@ -12,10 +12,9 @@
 #define TFT_BL    5
 #define TFT_MISO  4
 
-// Touch FT6236U — I2C (independent bus, no conflict with TFT SPI)
-#define TOUCH_SDA 8
-#define TOUCH_SCL 9
-#define TOUCH_RST 3   // CTP_RST
+// Touch XPT2046 — shares TFT SPI3 data/clock lines, dedicated chip select.
+#define TOUCH_CS   46
+#define TOUCH_IRQ  -1   // Not connected; touch is polled.
 
 // Ethernet W5500 — SPI2_HOST
 #define LAN_SCK   12
@@ -34,6 +33,7 @@ class LGFX : public lgfx::LGFX_Device {
     lgfx::Panel_ILI9488 _panel_instance;
     lgfx::Bus_SPI       _bus_instance;
     lgfx::Light_PWM     _light_instance;
+    lgfx::Touch_XPT2046 _touch_instance;
 
 public:
     LGFX() {
@@ -72,8 +72,28 @@ public:
             cfg.invert           = false;
             cfg.rgb_order        = false;
             cfg.dlen_16bit       = false;
-            cfg.bus_shared       = false; // Dedicated bus — no sharing with W5500
+            cfg.bus_shared       = true;  // Shared only with XPT2046; W5500 stays on SPI2
             _panel_instance.config(cfg);
+        }
+
+        // Resistive touch controller shares the TFT SPI3 bus.
+        {
+            auto cfg = _touch_instance.config();
+            cfg.spi_host        = SPI3_HOST;
+            cfg.pin_sclk        = TFT_SCLK;
+            cfg.pin_mosi        = TFT_MOSI;
+            cfg.pin_miso        = TFT_MISO;
+            cfg.pin_cs          = TOUCH_CS;
+            cfg.pin_int         = TOUCH_IRQ;
+            cfg.freq            = 1000000;
+            cfg.x_min           = 3900;
+            cfg.x_max           = 300;
+            cfg.y_min           = 400;
+            cfg.y_max           = 3900;
+            cfg.bus_shared      = true;
+            cfg.offset_rotation = 0;
+            _touch_instance.config(cfg);
+            _panel_instance.setTouch(&_touch_instance);
         }
 
         // Backlight Config (PWM)

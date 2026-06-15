@@ -1,6 +1,7 @@
 #include "rs485_manager.h"
 #include "data.h"
 #include "mapping_manager.h"
+#include "ui_screens.h"
 
 #include <DFRobot_RTU.h>
 #include <string.h>
@@ -949,6 +950,30 @@ static bool rs485_find_enabled_slave(uint16_t capability, RS485SlaveState& out) 
     return found;
 }
 
+static bool rs485_light_readback_matches(uint8_t address, uint8_t channel, bool expected_on) {
+    bool matches = false;
+    data_lock(g_state);
+    uint8_t index = rs485_find_slave_index_locked(address);
+    if (index < RS485_MAX_SLAVES) {
+        const RS485SlaveState& slave = g_state.rs485.slaves[index];
+        uint8_t quantity = slave.relay_count == 0 ? 1 : slave.relay_count;
+        if (quantity > 2) quantity = 2;
+        if (channel >= 1 && channel <= quantity) {
+            matches = (slave.relay_state[channel - 1] != 0) == expected_on;
+        } else if (channel == 0) {
+            matches = true;
+            for (uint8_t relay = 0; relay < quantity; relay++) {
+                if ((slave.relay_state[relay] != 0) != expected_on) {
+                    matches = false;
+                    break;
+                }
+            }
+        }
+    }
+    data_unlock(g_state);
+    return matches;
+}
+
 static bool rs485_write_light_command(uint8_t channel, bool on) {
     RS485SlaveState slave = {};
     if (!rs485_find_enabled_slave(RS485_CAP_LIGHT_RELAY, slave)) {
@@ -974,8 +999,8 @@ static bool rs485_write_light_command(uint8_t channel, bool on) {
     if (channel >= 1 && channel <= 2) {
         uint16_t reg = channel == 1 ? RS485_MODBUS_REG_RELAY_1 : RS485_MODBUS_REG_RELAY_2;
         bool ok = rs485_write_holding_register(slave.address, reg, on ? 1 : 0, "LIGHT_CHANNEL_COMMAND");
-        if (ok) rs485_poll_sensor_registers(slave.address);
-        return ok;
+        if (!ok || !rs485_poll_sensor_registers(slave.address)) return false;
+        return rs485_light_readback_matches(slave.address, channel, on);
     }
 
     uint16_t relays[2] = {
@@ -988,8 +1013,8 @@ static bool rs485_write_light_command(uint8_t channel, bool on) {
                                                   relays, quantity, "LIGHT_COMMAND")
                   : rs485_write_holding_register(slave.address, RS485_MODBUS_REG_RELAY_1,
                                                  relays[0], "LIGHT_COMMAND");
-    if (ok) rs485_poll_sensor_registers(slave.address);
-    return ok;
+    if (!ok || !rs485_poll_sensor_registers(slave.address)) return false;
+    return rs485_light_readback_matches(slave.address, 0, on);
 }
 
 static uint8_t rs485_normalize_ac_enum(uint8_t value) {
@@ -1764,18 +1789,68 @@ void rs485_request_ac_command(bool power, float target_c, uint8_t mode, uint8_t 
     data_unlock(g_state);
 }
 
+static RS485SlaveState* rs485_projector_lux_slave_locked() {
+    const LogicalMapping& mapping = g_state.rs485.mappings[LOGICAL_PROJECTOR_CONTROL];
+    if (!mapping.assigned) return nullptr;
+
+    uint8_t count = g_state.rs485.slave_count;
+    if (count > RS485_MAX_SLAVES) count = RS485_MAX_SLAVES;
+    for (uint8_t i = 0; i < count; i++) {
+        RS485SlaveState& slave = g_state.rs485.slaves[i];
+        bool mapping_matches = mapping.slave_uid != 0
+                                   ? slave.uid == mapping.slave_uid
+                                   : slave.address == mapping.slave_addr;
+        if (!mapping_matches) continue;
+        if (!slave.online ||
+            !(slave.enabled_mask & RS485_CAP_PROJECTOR_IR) ||
+            !(slave.enabled_mask & RS485_CAP_LUX) ||
+            !slave.lux_valid) {
+            return nullptr;
+        }
+        return &slave;
+    }
+    return nullptr;
+}
+
+static uint32_t rs485_projector_lux_source_key(const RS485SlaveState& slave) {
+    return slave.uid != 0 ? slave.uid : (0xFF000000UL | slave.address);
+}
+
+static void rs485_reset_projector_lux_baseline_locked(uint32_t source_key) {
+    g_state.sensor.proj_lux_source_key = source_key;
+    g_state.sensor.proj_lux_baseline_avg = -1.0f;
+    g_state.sensor.proj_lux_baseline_valid = false;
+    memset(g_state.sensor.proj_lux_baseline, 0, sizeof(g_state.sensor.proj_lux_baseline));
+    memset(g_state.sensor.proj_lux_baseline_channel_valid, 0,
+           sizeof(g_state.sensor.proj_lux_baseline_channel_valid));
+}
+
 void rs485_request_projector_command(bool power, uint8_t input) {
     data_lock(g_state);
+    Serial.printf("[Projector] Queue command target=%s previous=%s verif=%u\n",
+                  power ? "ON" : "OFF",
+                  g_state.sensor.projector_on ? "ON" : "OFF",
+                  g_state.sensor.proj_verif_state);
     g_state.rs485.projector_command_requested = true;
     g_state.rs485.projector_command_power = power;
     g_state.rs485.projector_command_input = input;
 
     if (power) {
+        RS485SlaveState* projector_lux_slave = rs485_projector_lux_slave_locked();
+        uint32_t source_key = projector_lux_slave ? rs485_projector_lux_source_key(*projector_lux_slave) : 0;
+        if (source_key != g_state.sensor.proj_lux_source_key) {
+            rs485_reset_projector_lux_baseline_locked(source_key);
+        }
         bool baseline_available = false;
-        for (uint8_t i = 0; i < 4; i++) {
-            if (g_state.sensor.proj_lux_baseline_channel_valid[i]) {
+        for (uint8_t i = 0; projector_lux_slave && i < 4; i++) {
+            if (projector_lux_slave->lux_channel_valid[i] &&
+                !g_state.sensor.proj_lux_baseline_channel_valid[i]) {
+                g_state.sensor.proj_lux_baseline[i] = projector_lux_slave->lux_channel[i];
+                g_state.sensor.proj_lux_baseline_channel_valid[i] = true;
+            }
+            if (projector_lux_slave->lux_channel_valid[i] &&
+                g_state.sensor.proj_lux_baseline_channel_valid[i]) {
                 baseline_available = true;
-                break;
             }
         }
         g_state.sensor.projector_on = true;
@@ -1835,12 +1910,17 @@ static ProjectorLuxEval rs485_projector_eval_lux_locked() {
     ProjectorLuxEval eval = {};
     eval.best_delta = -100000.0f;
     eval.best_channel = 0xFF;
+    RS485SlaveState* projector_lux_slave = rs485_projector_lux_slave_locked();
+    if (!projector_lux_slave ||
+        rs485_projector_lux_source_key(*projector_lux_slave) != g_state.sensor.proj_lux_source_key) {
+        return eval;
+    }
 
     for (uint8_t i = 0; i < 4; i++) {
         if (!g_state.sensor.proj_lux_baseline_channel_valid[i]) continue;
         eval.baseline_channels++;
 
-        if (!g_state.rs485.dashboard.lux_channel_valid[i]) {
+        if (!projector_lux_slave->lux_channel_valid[i]) {
             eval.has_warning_channel = true;
             continue;
         }
@@ -1850,7 +1930,7 @@ static ProjectorLuxEval rs485_projector_eval_lux_locked() {
         float threshold = 0.0f;
         float ratio = 0.0f;
         bool verified = rs485_projector_lux_verified(g_state.sensor.proj_lux_baseline[i],
-                                                     g_state.rs485.dashboard.lux_channel[i],
+                                                     projector_lux_slave->lux_channel[i],
                                                      &delta,
                                                      &threshold,
                                                      &ratio);
@@ -2214,6 +2294,19 @@ static void rs485_debug_write_relay(char* addr_token, char* channel_token, char*
 static void rs485_debug_process_line(char* line) {
     char* cmd = strtok(line, " \t");
     if (!cmd) return;
+
+    if (strcasecmp(cmd, "k") == 0) {
+        screens_set(SCREEN_TOUCH_TEST);
+        Serial.println("[TC] Touch alignment test opened.");
+        return;
+    }
+
+    if (strcasecmp(cmd, "b") == 0) {
+        screens_set(SCREEN_DASHBOARD);
+        Serial.println("[TC] Returned to dashboard.");
+        return;
+    }
+
     if (strcasecmp(cmd, "rs485") != 0) return;
 
     char* sub = strtok(nullptr, " \t");
@@ -2317,6 +2410,19 @@ static void rs485_debug_process_line(char* line) {
 static void rs485_debug_serial_loop() {
     while (Serial.available()) {
         char c = (char)Serial.read();
+
+        if ((c == 'k' || c == 'K') && debug_line_len == 0) {
+            screens_set(SCREEN_TOUCH_TEST);
+            Serial.println("[TC] Touch alignment test opened.");
+            continue;
+        }
+
+        if ((c == 'b' || c == 'B') && debug_line_len == 0) {
+            screens_set(SCREEN_DASHBOARD);
+            Serial.println("[TC] Returned to dashboard.");
+            continue;
+        }
+
         if (c == '\r') continue;
         if (c == '\n') {
             debug_line[debug_line_len] = '\0';
@@ -2492,10 +2598,16 @@ static void rs485_handle_control_commands() {
     if (light_requested) {
         bool ok = rs485_write_light_command(light_channel, light_on);
         data_lock(g_state);
+        g_state.rs485.light_command_failed = !ok;
+        g_state.rs485.light_state_publish_pending = true;
         snprintf(g_state.rs485.status, sizeof(g_state.rs485.status),
-                 ok ? "Light command confirmed" : "Light command failed");
+                 ok ? "Light state confirmed by readback" : "Light command/readback failed");
         g_state.ui_needs_update = true;
         data_unlock(g_state);
+        Serial.printf("[RS485] Light %s requested=%s channel=%u; MQTT confirmation queued\n",
+                      ok ? "confirmed" : "failed",
+                      light_on ? "ON" : "OFF",
+                      light_channel);
     }
 
     if (ac_requested) {
@@ -2521,11 +2633,16 @@ static void rs485_handle_projector_verification() {
     data_lock(g_state);
     if (!g_state.sensor.projector_on &&
         (g_state.sensor.proj_verif_state == 0 || g_state.sensor.proj_verif_state == 6)) {
+        RS485SlaveState* projector_lux_slave = rs485_projector_lux_slave_locked();
+        uint32_t source_key = projector_lux_slave ? rs485_projector_lux_source_key(*projector_lux_slave) : 0;
+        if (source_key != g_state.sensor.proj_lux_source_key) {
+            rs485_reset_projector_lux_baseline_locked(source_key);
+        }
         uint32_t sum = 0;
         uint8_t count = 0;
-        for (uint8_t i = 0; i < 4; i++) {
-            if (!g_state.rs485.dashboard.lux_channel_valid[i]) continue;
-            float lux = g_state.rs485.dashboard.lux_channel[i];
+        for (uint8_t i = 0; projector_lux_slave && i < 4; i++) {
+            if (!projector_lux_slave->lux_channel_valid[i]) continue;
+            float lux = projector_lux_slave->lux_channel[i];
             if (!g_state.sensor.proj_lux_baseline_channel_valid[i]) {
                 g_state.sensor.proj_lux_baseline[i] = lux;
                 g_state.sensor.proj_lux_baseline_channel_valid[i] = true;

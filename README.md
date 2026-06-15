@@ -2,7 +2,7 @@
 
 ESP32-S3 based master HMI for a smart building node network. This device is the central touchscreen controller for one room/class: it reconnects known RS485 slave nodes, reads room sensors, controls endpoints such as LED, AC, and projector, and publishes room data to a Flutter/mobile app through MQTT.
 
-The firmware targets an ESP32-S3 N16R8 board with a 3.5 inch ILI9488 serial SPI display, capacitive I2C touch, W5500 Ethernet, WiFi, MQTT, and an RS485 Modbus RTU field bus.
+The firmware targets an ESP32-S3 N16R8 board with a 3.5 inch ILI9488 serial SPI display, XPT2046 resistive SPI touch, W5500 Ethernet, WiFi, MQTT, and an RS485 Modbus RTU field bus.
 
 ## What This Device Does
 
@@ -26,8 +26,8 @@ Implementation effect:
 
 - Startup checks saved slave configuration first. If saved slaves exist, the master tries to reconnect them. If no saved slave exists, it stays idle until the user starts discovery.
 - MQTT publishes numeric data topics, for example `HD01/data/temp` and `HD01/data/co2`.
-- Simple sensor topics use integer payloads.
-- Temperature publishes one integer average Celsius value. `-1` means no valid temperature slot.
+- Simple sensor topics use integer payloads, except temperature.
+- Temperature publishes one float average Celsius value with one decimal place, for example `27.4`. When no temperature slot is valid, firmware skips the temperature publish and preserves the retained last-known value; Alert Bit 0 reports the invalid state.
 - LED and projector publish integer `1` or `0`.
 - AC uses the compact `PPTTFFSS` payload for power, target temperature, fan speed, and swing. AC target is clamped to `16..30` degrees Celsius.
 - MQTT also publishes `HD01/data/alert` as a decimal bitmask and `HD01/data/active` as retained online state.
@@ -55,7 +55,7 @@ condition exists.
 | 3 | 8 | Human-presence source invalid or unavailable. |
 | 4 | 16 | RS485/bus problem affecting an available light relay. |
 | 5 | 32 | Projector verification/hardware warning or projector bus problem. |
-| 6 | 64 | RS485/bus problem affecting the available AC control. |
+| 6 | 64 | AC control/bus error or AC cooling-performance warning. |
 | 7 | 128 | After-hours empty-room active-load anomaly. |
 
 Example:
@@ -69,6 +69,66 @@ This means active-load anomaly, invalid presence, and invalid temperature are
 active together. The server is responsible for decoding the decimal bitmask
 before presenting human-readable warnings to the mobile app.
 
+### AC Cooling-Performance Warning
+
+Alert Bit 6 does not require the room to reach the configured AC target. A
+target of `16 C`, for example, is treated as an AC command, not a promise that
+the room itself will become `16 C`.
+
+The master starts a conservative cooling-response check only when:
+
+- the mapped AC control is available and continuously ON;
+- at least one valid room-temperature source exists; and
+- average room temperature is at least `2 C` above the AC target.
+
+The master then observes a rolling 30-minute window. If average room
+temperature drops less than `0.5 C`, Alert Bit 6 is raised. Turning AC OFF,
+changing the target, losing valid temperature feedback, or reaching near-target
+temperature resets the evaluation. A later valid cooling response clears the
+warning automatically.
+
+### Projector Lux Verification
+
+BH1750/Lux feedback for the projector is optional. The projector ON/OFF command
+always remains usable even when no Lux sensor is installed.
+
+Only Lux channels physically exposed by the same mapped slave that owns
+`PROJECTOR_IR` are allowed to verify the projector. Lux from DHT, room-sensor,
+or any other slave is ignored by projector verification.
+
+While the projector is OFF, the master continuously learns a slow-moving
+ambient baseline for every valid Lux channel on that projector slave. After
+Projector ON is requested, each channel is compared against its own baseline. A
+channel verifies ON when either:
+
+- its Lux increase reaches `clamp(baseline * 20%, 20 lx, 80 lx)`; or
+- its reading reaches at least `1.25x` baseline with an increase of at least
+  `15 lx`.
+
+If at least one channel verifies ON, the projector remains ON. When another
+expected channel is missing or unchanged, the UI shows `CHK LUX` so wiring or
+sensor placement can be inspected without falsely marking the projector OFF.
+The first verification window lasts up to 8 seconds. If no channel verifies ON,
+the master retries the ON command once and opens another 8-second window. After
+the second failed check it keeps the requested ON state, shows `CHK PROJ` for
+10 seconds, and raises Alert Bit 5 during that warning period.
+
+If no valid Lux channel exists, the command is sent normally and the UI shows
+green `ON` with red `NO LUX`. Missing Lux never blocks projector control and is
+not treated as projector failure by itself.
+
+Lux verification currently confirms Projector ON only. Projector OFF follows
+the requested IR/control state directly and does not wait for a Lux decrease,
+because ambient sunlight and room lamps can keep Lux high after the projector
+turns off.
+
+If the mapped projector slave has no valid Lux, verification immediately uses
+`NO LUX`; Lux available on another slave does not delay the projector command.
+Room-Lux publishing remains independently controlled by the `LOGICAL_LUX_MAIN`
+mapping. Projector-slave Lux is local-only verification data and never
+contributes to `HD01/data/lux`; MQTT room Lux must come from another
+non-projector Lux source.
+
 ## Lamp Control And Planned Verification
 
 - The local master touchscreen exposes `LED 1` and `LED 2` separately.
@@ -78,6 +138,17 @@ before presenting human-readable warnings to the mobile app.
   Relay 2 together.
 - MQTT `HD01/data/led` remains an aggregate state: `1` means at least one lamp
   relay is ON; `0` means all lamp relays are OFF.
+- MQTT LED commands are not published optimistically. The master writes the
+  relay register, immediately reads Relay 1/2 back from the slave, then
+  publishes the confirmed aggregate state to `HD01/data/led`.
+- Lux is not required to confirm LED ON/OFF. If no Lux sensor is installed,
+  relay-register readback still provides immediate ON/OFF confirmation.
+- Remote LED commands are blocked only while presence feedback is valid and the
+  room is confirmed occupied. Missing or invalid presence feedback raises its
+  own alert but does not silently block an LED OFF command.
+- A failed LED write or relay readback publishes the last confirmed cached
+  relay state and raises Alert Bit 4 instead of falsely claiming the requested
+  state succeeded.
 
 Lux-based lamp verification is intentionally not active yet. A future checker
 must not report lamp failure merely because sunlight changes, clouds pass, or
@@ -90,7 +161,7 @@ own Lux zone and use a persistent `INCONCLUSIVE` state before raising a warning.
 
 - Keeps fast RS485 sensor-block polling while MQTT uses event-driven updates and 5-minute heartbeats.
 - Publishes temperature every 5 seconds for 5 minutes after AC ON or a target change of at least 1 C.
-- Publishes Lux 5 seconds after the lamp state changes, then returns to the 5-minute heartbeat.
+- Publishes non-projector room Lux on the MQTT connection snapshot and 5-minute heartbeat only.
 - Splits only the local master touchscreen light control into `LED 1` and
   `LED 2`. The mobile app/server keeps one aggregate Lamp control; every
   `control/led` MQTT command and schedule action controls both configured light
@@ -99,6 +170,10 @@ own Lux zone and use a persistent `INCONCLUSIVE` state before raising a warning.
 - Plans logical separation between room Lux, projector-verification Lux, and Lux outlier detection while keeping the existing 5-7 day active-load anomaly.
 - Keeps master authority over lamp commands while a room is confirmed occupied.
 - Implements the local daily schedule engine: validates and stores `YYYYMMDD;HHMM-HHMM;...`, overwrites the previous schedule, triggers pre-class actions 20 minutes early, starts smart shutdown at class end, and catches up after reboot.
+- Every valid daily schedule payload immediately replaces the previous stored
+  schedule, even if one or more old schedule slots have not happened yet.
+- Adds conservative AC cooling-performance monitoring through Alert Bit 6
+  without requiring room temperature to reach the AC setpoint.
 - Full implementation status and remaining Lux work: `docs/V2.8_Planning.md`.
 
 ### V2.7.1
@@ -111,7 +186,11 @@ own Lux zone and use a persistent `INCONCLUSIVE` state before raising a warning.
 
 ### V2.7
 
-- **Projector Verification**: Implemented projector verification using BH1750 ambient light delta ($\Delta L \ge 50\text{ lx}$) over 8 seconds. Optimistically publishes `"1"` (ON) to MQTT when powering, retries once on failure, then falls back to OFF and publishes `"0"` with Alert Bit 5 (32) raised. If no valid Lux sensor is available ($<0.0\text{ lx}$), it skips the check and transitions directly to ON.
+- **Legacy Projector Verification**: V2.7 originally used a fixed BH1750
+  ambient-light delta and could fall back to OFF after failed verification.
+  This behavior is superseded by the V2.7.1 adaptive per-channel verification
+  described above; current firmware never marks the projector OFF solely
+  because optional Lux feedback did not verify one-way IR control.
 - **Occupancy Safety Overrides (Acceptation Level)**: Restricts remote MQTT commands when human presence is detected (`human_presence == true`). Ignores remote light ON/OFF commands and remote AC OFF commands to prevent remote scripts from disrupting active classes. Remote AC temperature adjustments, fan speed, swing mode, and local HMI touchscreen controls always bypass this constraint.
 - **Scheduler & Smart Shutdown**: Subscribes to and parses `"PRE_CLASS_ON"` (turns ON AC and lights immediately, clearing pending shutdown timers) and `"CLASS_ENDED"` (starts 20-minute empty room shutdown timer) on `control/schedule`. When the timer expires, turns off lights and AC only if the room is empty (`human_presence == false`).
 - **7-Day Rolling Lamp Anomaly Alerting**: Logs daily active lamp minutes. Rollover occurs at midnight via NTP time and persists to NVS circular buffer `light_history_min[day_count % 7]`. Triggers Alert Bit 7 (128) if today's duration exceeds the 7-day average by $1.5\times$ during after-hours (22:00-06:00) when the room is empty (`human_presence == false`).
@@ -167,7 +246,7 @@ own Lux zone and use a persistent `INCONCLUSIVE` state before raising a warning.
 |---|---|
 | MCU | ESP32-S3 N16R8 |
 | Display | ILI9488 3.5 inch TFT, 480x320, serial SPI |
-| Touch | Capacitive I2C touch, SDA GPIO8, SCL GPIO9, RST GPIO3 |
+| Touch | XPT2046 resistive SPI touch, shared TFT SCK/MOSI/MISO, CS GPIO46 |
 | Ethernet | W5500 on dedicated SPI2 bus |
 | Field bus | RS485 through MAX3485, Modbus RTU, 19200 8N1 |
 | Framework | Arduino with PlatformIO |
@@ -178,7 +257,7 @@ own Lux zone and use a persistent `INCONCLUSIVE` state before raising a warning.
 |---|---|
 | `src/ui_screens.*` | Dashboard, Settings, WiFi, LAN, Slave Manager, Mapping UI |
 | `src/display.*` | LovyanGFX display setup and pin mapping |
-| `src/touch.*` | Capacitive touch polling and gesture events |
+| `src/touch.*` | Resistive SPI touch polling and gesture events |
 | `src/wifi_manager.*` | WiFi credentials, reconnect, async scan |
 | `src/lan_manager.*` | W5500 Ethernet setup and link state |
 | `src/mqtt_manager.*` | MQTT per-topic publish/subscribe, sensor payloads, and actuator commands |
@@ -241,7 +320,7 @@ flowchart TD
     MQTTConnect --> Subscribe[Subscribe actuator command topics]
     MQTTConnect --> Publish[Publish per-sensor topics]
 
-    Publish --> TempTopic["Example: HD01/data/temp integer avg"]
+    Publish --> TempTopic["Example: HD01/data/temp float avg"]
     Publish --> CO2Topic["Example: HD01/data/co2 integer"]
     Publish --> LEDTopic["Example: HD01/data/led 1/0 state"]
     Publish --> AlertTopic["Example: HD01/data/alert bitmask"]
@@ -386,6 +465,6 @@ Important docs:
 - Startup must check saved slave data before discovery. Saved slaves are reconnected first; if none exist, firmware does not auto-assign anything.
 - Slave firmware stays RAM-only for address/capability config; master persists MAC to address mapping.
 - Firmware V2.1 slave selection uses master-owned Device Profiles.
-- Temperature MQTT payload is one integer average Celsius value. `-1` means unavailable.
+- Temperature MQTT payload is one float average Celsius value with one decimal place. Invalid temperature is not published as `-1`; firmware preserves the retained last-known value and raises Alert Bit 0.
 - LED and projector MQTT payloads use integer `1` or `0`.
-- Simple sensor MQTT payloads use integers unless a later spec requires structured data.
+- Simple sensor MQTT payloads use integers unless their specific contract says otherwise; temperature uses a one-decimal float.

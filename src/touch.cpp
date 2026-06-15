@@ -1,148 +1,183 @@
 #include "touch.h"
+#include "display.h"
+#include "data.h"
+#include <lgfx/v1/platforms/common.hpp>
 
-static bool touch_online = false;
-static uint8_t touch_addr = FT6236U_ADDR;
-
-// Touch sensor is portrait (0-320 x 0-480), display is landscape (480x320).
-// Display rotation is 3, which is 180 degrees from the previous rotation 1 mounting.
-#define TOUCH_SWAP_XY    true
-#define TOUCH_FLIP_X     true
-#define TOUCH_FLIP_Y     false
-#define TOUCH_MAX_X      480
-#define TOUCH_MAX_Y      320
-
-static bool i2c_ping(uint8_t addr) {
-    Wire.beginTransmission(addr);
-    return Wire.endTransmission() == 0;
-}
-
-static void touch_scan_bus() {
-    Serial.printf("[TC] I2C scan SDA:%d SCL:%d\n", TOUCH_SDA, TOUCH_SCL);
-    bool found = false;
-
-    for (uint8_t addr = 1; addr < 127; addr++) {
-        if (i2c_ping(addr)) {
-            Serial.printf("[TC] I2C device found at 0x%02X\n", addr);
-            found = true;
-        }
-    }
-
-    if (!found) Serial.println("[TC] I2C scan: no devices found");
-}
-
-static bool touch_detect() {
-    const uint8_t candidates[] = { FT6236U_ADDR, GT911_ADDR_1, GT911_ADDR_2 };
-
-    for (uint8_t i = 0; i < sizeof(candidates); i++) {
-        if (i2c_ping(candidates[i])) {
-            touch_addr = candidates[i];
-            return true;
-        }
-    }
-
-    return false;
-}
-
-static void ft_read_data(uint8_t* buf, uint8_t len) {
-    if (!touch_online) return;
-
-    Wire.beginTransmission(touch_addr);
-    Wire.write(FT_REG_NUM_FINGER);
-    if (Wire.endTransmission(false) != 0) {
-        touch_online = false;
-        return;
-    }
-
-    if (Wire.requestFrom(touch_addr, len) == len) {
-        for (uint8_t i = 0; i < len; i++) {
-            buf[i] = Wire.read();
-        }
-    } else {
-        touch_online = false;
-    }
-}
-
-void touch_init() {
-    Serial.println("[TC] --- Touch Initialization ---");
-
-    pinMode(TOUCH_SDA, INPUT_PULLUP);
-    pinMode(TOUCH_SCL, INPUT_PULLUP);
-    pinMode(TOUCH_RST, OUTPUT);
-    digitalWrite(TOUCH_RST, HIGH); delay(10);
-    digitalWrite(TOUCH_RST, LOW);  delay(50);
-    digitalWrite(TOUCH_RST, HIGH); delay(300);
-
-    Wire.begin(TOUCH_SDA, TOUCH_SCL);
-    Wire.setClock(100000);
-
-    touch_scan_bus();
-
-    touch_online = touch_detect();
-
-    if (touch_online) {
-        Serial.printf("[TC] Touch controller detected at 0x%02X\n", touch_addr);
-        if (touch_addr != FT6236U_ADDR) {
-            Serial.println("[TC] Warning: parser is FT6236U-style; GT911 needs a different parser.");
-        }
-    } else {
-        Serial.println("[TC] Touch controller NOT FOUND!");
-    }
-}
-
-static uint32_t last_scan = 0;
+static bool touch_cs_output_ok = false;
 static bool     touch_was_pressed = false;
 static uint32_t last_valid_press  = 0;
 static int      last_touch_x = 0;
 static int      last_touch_y = 0;
 static uint32_t last_move_ts = 0;
+static uint32_t last_diag_ts = 0;
+static uint32_t last_raw_log_ts = 0;
+
+static int32_t touch_correct_screen_x(int32_t x) {
+    if (x <= 223) {
+        return 35 + (x * 205) / 223;
+    }
+    return 240 + ((x - 223) * 205) / 225;
+}
+
+static int32_t touch_correct_screen_y(int32_t y) {
+    if (y <= 184) {
+        return 70 + ((y - 62) * 110) / 122;
+    }
+    return 180 + ((y - 184) * 110) / 116;
+}
+
+static uint16_t touch_spi_read_adc(uint8_t command) {
+    uint8_t data[3] = {command, 0x00, 0x00};
+    lgfx::spi::readBytes(SPI3_HOST, data, sizeof(data));
+    uint16_t value = (uint16_t)data[1] << 8;
+    value |= data[2];
+    return (value >> 3) & 0x0FFF;
+}
+
+static void touch_probe_direct_spi() {
+    if (!touch_cs_output_ok) return;
+    if (bus_mutex && xSemaphoreTake(bus_mutex, pdMS_TO_TICKS(30)) != pdTRUE) {
+        Serial.println("[TC][PROBE] Cannot acquire shared SPI bus");
+        return;
+    }
+
+    pinMode(TFT_CS, OUTPUT);
+    pinMode(TOUCH_CS, OUTPUT);
+
+    digitalWrite(TFT_CS, HIGH);
+    lgfx::spi::beginTransaction(SPI3_HOST, 1000000, 0);
+    digitalWrite(TOUCH_CS, LOW);
+    delayMicroseconds(5);
+
+    int miso_idle = digitalRead(TFT_MISO);
+    uint16_t x = touch_spi_read_adc(0xD0);
+    uint16_t y = touch_spi_read_adc(0x90);
+    uint16_t z1 = touch_spi_read_adc(0xB0);
+    uint16_t z2 = touch_spi_read_adc(0xC0);
+
+    digitalWrite(TOUCH_CS, HIGH);
+    lgfx::spi::endTransaction(SPI3_HOST);
+    if (bus_mutex) xSemaphoreGive(bus_mutex);
+
+    Serial.printf("[TC][PROBE] direct SPI MISO:%d X:%u Y:%u Z1:%u Z2:%u\n",
+                  miso_idle, x, y, z1, z2);
+    if ((x == 0 && y == 0 && z1 == 0 && z2 == 0) ||
+        (x == 4095 && y == 4095 && z1 == 4095 && z2 == 4095)) {
+        Serial.println("[TC][PROBE][ERROR] MISO response is stuck; check T_DO wiring, T_CS wiring, power, and controller type.");
+    }
+}
+
+static void touch_test_cs_pin() {
+    pinMode(TOUCH_CS, OUTPUT);
+
+    digitalWrite(TOUCH_CS, HIGH);
+    delayMicroseconds(10);
+    int high_read = digitalRead(TOUCH_CS);
+
+    digitalWrite(TOUCH_CS, LOW);
+    delayMicroseconds(10);
+    int low_read = digitalRead(TOUCH_CS);
+
+    digitalWrite(TOUCH_CS, HIGH);
+    touch_cs_output_ok = high_read == HIGH && low_read == LOW;
+
+    Serial.printf("[TC][DIAG] CS GPIO%d output test: HIGH read=%d, LOW read=%d => %s\n",
+                  TOUCH_CS, high_read, low_read, touch_cs_output_ok ? "PASS" : "FAIL");
+    if (!touch_cs_output_ok) {
+        Serial.println("[TC][ERROR] XPT2046 CS cannot be driven HIGH/LOW; check pin capability and wiring.");
+    }
+}
+
+void touch_init() {
+    Serial.println("[TC] --- Touch Initialization ---");
+    Serial.printf("[TC] XPT2046 resistive SPI | CS:%d SCLK:%d MOSI:%d MISO:%d IRQ:unused\n",
+                  TOUCH_CS, TFT_SCLK, TFT_MOSI, TFT_MISO);
+    Serial.println("[TC] Display driver: LovyanGFX Panel_ILI9488 over SPI3");
+    touch_test_cs_pin();
+    Serial.println("[TC][DIAG] Touch raw/coordinate diagnostics enabled.");
+    touch_probe_direct_spi();
+}
 
 static bool touch_read_current(int &tx, int &ty, bool &pressed) {
-    uint32_t now = millis();
     pressed = false;
 
-    if (!touch_online && (now - last_scan > 2000)) {
-        last_scan = now;
-        touch_online = touch_detect();
-        Serial.printf("[TC] Retry detect: %s", touch_online ? "FOUND" : "not found");
-        if (touch_online) Serial.printf(" at 0x%02X", touch_addr);
-        Serial.println();
+    lgfx::touch_point_t raw;
+    uint_fast8_t raw_count = 0;
+    int32_t x = -1;
+    int32_t y = -1;
+    if (bus_mutex && xSemaphoreTake(bus_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+        raw_count = tft.getTouchRaw(&raw);
+        pressed = tft.getTouch(&x, &y);
+        xSemaphoreGive(bus_mutex);
+    } else if (!bus_mutex) {
+        raw_count = tft.getTouchRaw(&raw);
+        pressed = tft.getTouch(&x, &y);
+    } else {
+        uint32_t now = millis();
+        if (now - last_diag_ts >= 2000) {
+            last_diag_ts = now;
+            Serial.println("[TC][WARN] SPI bus mutex timeout while reading touch");
+        }
+        return false;
     }
 
-    if (!touch_online) return false;
-
-    uint8_t data[7] = {0};
-    ft_read_data(data, 5);
-
-    if (!touch_online) return false;
-
-    uint8_t num_fingers = data[0] & 0x0F;
-    if (num_fingers == 0 || num_fingers > 2) {
-        return true;
+    // The installed resistive overlay is mounted 180 degrees from the display.
+    // Keep LovyanGFX touch reading untouched and invert only final screen coordinates.
+    if (pressed) {
+        x = (tft.width() - 1) - x;
+        y = (tft.height() - 1) - y;
+        x = touch_correct_screen_x(x);
+        y = touch_correct_screen_y(y);
+        if (x < 0 || x >= tft.width() || y < 0 || y >= tft.height()) {
+            Serial.printf("[TC][WARN] Rejected out-of-screen mapped coordinate: %ld,%ld\n",
+                          (long)x, (long)y);
+            pressed = false;
+        }
     }
 
-    int raw_x = ((data[1] & 0x0F) << 8) | data[2];
-    int raw_y = ((data[3] & 0x0F) << 8) | data[4];
-    uint8_t event = (data[1] >> 6) & 0x03;
-
-    if (event == 1) {
-        return true;
+    uint32_t now = millis();
+    if (raw_count && now - last_raw_log_ts >= 100) {
+        last_raw_log_ts = now;
+        Serial.printf("[TC][RAW] x:%d y:%d pressure:%u | mapped:%ld,%ld pressed:%s\n",
+                      raw.x, raw.y, raw.size, (long)x, (long)y, pressed ? "YES" : "NO");
+    } else if (!raw_count && now - last_diag_ts >= 2000) {
+        last_diag_ts = now;
+        Serial.printf("[TC][DIAG] No valid XPT2046 touch sample | CS output:%s GPIO%d level:%d\n",
+                      touch_cs_output_ok ? "PASS" : "FAIL", TOUCH_CS, digitalRead(TOUCH_CS));
+        touch_probe_direct_spi();
     }
 
-    int final_x = raw_x;
-    int final_y = raw_y;
+    static bool last_pressed_state = false;
+    bool state_changed = (pressed != last_pressed_state);
+    last_pressed_state = pressed;
 
-    if (TOUCH_SWAP_XY) {
-        int temp = final_x;
-        final_x = final_y;
-        final_y = temp;
+    data_lock(g_state);
+    g_state.touch_pressed = pressed;
+    if (pressed) {
+        g_state.touch_x = (int)x;
+        g_state.touch_y = (int)y;
+        g_state.touch_raw_x = raw.x;
+        g_state.touch_raw_y = raw.y;
+        g_state.touch_last_x = (int)x;
+        g_state.touch_last_y = (int)y;
+        g_state.touch_last_raw_x = raw.x;
+        g_state.touch_last_raw_y = raw.y;
+        g_state.ui_needs_update = true;
+    } else {
+        g_state.touch_x = -1;
+        g_state.touch_y = -1;
+        g_state.touch_raw_x = 0;
+        g_state.touch_raw_y = 0;
+        if (state_changed) {
+            g_state.ui_needs_update = true;
+        }
     }
+    data_unlock(g_state);
 
-    if (TOUCH_FLIP_X) final_x = (TOUCH_MAX_X - 1) - final_x;
-    if (TOUCH_FLIP_Y) final_y = (TOUCH_MAX_Y - 1) - final_y;
-
-    tx = final_x;
-    ty = final_y;
-    pressed = true;
+    if (pressed) {
+        tx = (int)x;
+        ty = (int)y;
+    }
     return true;
 }
 

@@ -2,11 +2,11 @@
 
 ## 1. Project Overview & Understanding
 
-Proyek ini adalah evolusi dari **Smart Building Master S3** versi Parallel. Tujuan utamanya adalah melakukan upgrade hardware dari sistem parallel 8-bit ke sistem **Serial SPI** untuk display dan **Capacitive Touch** untuk input, guna meningkatkan reliabilitas dan kemudahan wiring, serta mengadopsi arsitektur **Agent-Based** untuk skalabilitas kode.
+Proyek ini memakai **Serial SPI** untuk display dan **XPT2046 Resistive Touch SPI** untuk input, serta mengadopsi arsitektur **Agent-Based** untuk skalabilitas kode.
 
 ### Key Changes from Previous Version (FSD 1.1):
 - **Display**: Migrasi dari ILI9488 Parallel 8-bit ke **ILI9488 SPI (Serial)**.
-- **Touch**: Migrasi dari Resistive Touch (Shared pins/ADC) ke **Capacitive Touch** (biasanya via I2C).
+- **Touch**: XPT2046 resistive touch berbagi SCLK/MOSI/MISO dengan TFT dan memakai CS terpisah.
 - **Graphics Library**: Menggunakan **LovyanGFX** sebagai engine utama (menggantikan TFT_eSPI atau driver manual).
 - **UI Framework**: Mengintegrasikan library custom [hazzma/SmartBuildingUI](https://github.com/hazzma/UI-SmartBuilding).
 - **Communication**: Penambahan modul **RS485** untuk komunikasi ke Slave/perangkat industri.
@@ -28,10 +28,11 @@ Dengan berpindah ke SPI, kita membebaskan banyak pin GPIO yang sebelumnya diguna
 | **TFT_SCLK** | 6 | SPI3 SCK |
 | **TFT_BL** | 5 | Backlight PWM |
 | **TFT_MISO** | 4 | SPI3 MISO (Optional for TFT) |
-| **TP_SDA** | 8 | I2C SDA (Capacitive Touch) |
-| **TP_SCL** | 9 | I2C SCL (Capacitive Touch) |
-| **TP_INT** | - | Not connected / unused |
-| **TP_RST** | 3 | Touch Reset / CTP_RST |
+| **TP_CS** | 46 | XPT2046 chip select |
+| **TP_CLK** | 6 | Shared SPI3 SCLK with TFT |
+| **TP_DIN** | 7 | Shared SPI3 MOSI with TFT |
+| **TP_DO** | 4 | Shared SPI3 MISO with TFT |
+| **TP_IRQ** | - | Not connected / polling used |
 
 ### 2.2 Ethernet (W5500 SPI Bus)
 | Function | Pin (GPIO) | Notes |

@@ -51,9 +51,9 @@ Runtime payloads are intentionally small:
 
 | Topic example | Payload | Meaning |
 |---|---|---|
-| `HD01/data/temp` | Integer | Average temperature in Celsius, rounded from valid temperature slots. `-1` means no valid temperature. |
+| `HD01/data/temp` | Float | Average temperature in Celsius with one decimal place, for example `27.4`. Publish is skipped while no temperature is valid so the retained last-known value is preserved; Alert Bit 0 indicates invalid temperature. |
 | `HD01/data/co2` | Integer | CO2 ppm. |
-| `HD01/data/lux` | Integer | Lux value. |
+| `HD01/data/lux` | Integer | Valid non-projector room Lux. Projector-verification Lux is local-only and never published. |
 | `HD01/data/human` | Integer | `1` means presence detected, `0` means no presence. |
 | `HD01/data/led` | Integer | `1` means any mapped LED/relay is ON, `0` means all mapped LED/relay outputs are OFF. |
 | `HD01/data/projector` | Integer | `1` means projector ON command/state, `0` means OFF command/state. |
@@ -78,6 +78,15 @@ resets slot trigger flags. Example: `20260609;0800-0930;1015-1200`. This lets
 the server push one daily schedule around midnight while the master executes the
 day locally if server/MQTT availability becomes unstable later.
 
+The overwrite is immediate: a newly accepted payload replaces all previous
+slots even when an old slot has not started or ended yet.
+
+LED state publication uses relay-register confirmation. After
+`<class>/control/led`, the master writes the relay command, reads Relay 1/2 back,
+then publishes the confirmed aggregate `0` or `1` to `<class>/data/led`. Lux is
+optional and is not part of LED ON/OFF confirmation. A failed write/readback
+raises Alert Bit 4 and does not publish the requested state as if it succeeded.
+
 Current V2.8 implementation: `PRE_CLASS_ON`, `CLASS_ENDED`, daily schedule
 validation, NVS persistence, overwrite, reboot catch-up, and local execution are
 active. See `docs/V2.8_Planning.md`.
@@ -94,7 +103,7 @@ active. See `docs/V2.8_Planning.md`.
 | 3 | 8 | Human/presence sensor error / no valid presence. |
 | 4 | 16 | LED/relay error. |
 | 5 | 32 | Check projector / IR path. Raised when Projector ON was commanded but no Lux channel verified ON after retry. |
-| 6 | 64 | AC error. |
+| 6 | 64 | AC control/bus error or cooling-performance warning. |
 | 7 | 128 | After-hours empty-room active-load anomaly. Recommended V2.7.1 trigger: valid time, valid empty occupancy, enough baseline days, and `active_load_minutes > max(avg_7d * 1.5, avg_7d + 60)` during 22:00-06:00. |
 
 Example:

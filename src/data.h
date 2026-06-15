@@ -171,6 +171,8 @@ struct RS485State {
     bool light_command_requested;
     bool light_command_on;
     uint8_t light_command_channel;
+    bool light_state_publish_pending;
+    bool light_command_failed;
     bool ac_command_requested;
     bool ac_command_power;
     float ac_command_target_c;
@@ -203,6 +205,11 @@ struct SensorData {
     bool     ac_on;
     uint8_t  ac_fan_speed;
     uint8_t  ac_swing_mode;
+    bool     ac_performance_warning;
+    bool     ac_performance_monitor_active;
+    float    ac_performance_start_temp_c;
+    float    ac_performance_target_c;
+    uint32_t ac_performance_started_ms;
     bool     projector_on;
     bool     light_on;
     bool     human_presence;
@@ -217,6 +224,7 @@ struct SensorData {
     bool     proj_lux_baseline_valid;
     float    proj_lux_baseline[4];
     bool     proj_lux_baseline_channel_valid[4];
+    uint32_t proj_lux_source_key;
     uint32_t proj_warmup_timer_ms;
     uint32_t proj_warning_until_ms;
     uint8_t  proj_retry_count;
@@ -303,6 +311,17 @@ struct BuildingState {
     uint32_t            last_data_ts;
     SemaphoreHandle_t   mutex;
     RS485State          rs485;
+
+    // Touch diagnostics
+    int                 touch_x;
+    int                 touch_y;
+    uint16_t            touch_raw_x;
+    uint16_t            touch_raw_y;
+    bool                touch_pressed;
+    int                 touch_last_x;
+    int                 touch_last_y;
+    uint16_t            touch_last_raw_x;
+    uint16_t            touch_last_raw_y;
 };
 
 extern BuildingState g_state;

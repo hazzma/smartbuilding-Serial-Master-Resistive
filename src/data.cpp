@@ -60,6 +60,17 @@ void data_init(BuildingState& state) {
     state.use_dummy = false;
     state.ui_needs_update = true;
     state.last_data_ts = millis();
+
+    state.touch_x = -1;
+    state.touch_y = -1;
+    state.touch_raw_x = 0;
+    state.touch_raw_y = 0;
+    state.touch_pressed = false;
+    state.touch_last_x = -1;
+    state.touch_last_y = -1;
+    state.touch_last_raw_x = 0;
+    state.touch_last_raw_y = 0;
+
     data_load_dummy(state);
     data_load_device_config(state);
     data_load_rs485_config(state);
@@ -77,6 +88,11 @@ void data_load_dummy(BuildingState& state) {
         state.sensor.ac_on = true;
         state.sensor.ac_fan_speed = 0;
         state.sensor.ac_swing_mode = 0;
+        state.sensor.ac_performance_warning = false;
+        state.sensor.ac_performance_monitor_active = false;
+        state.sensor.ac_performance_start_temp_c = -100.0f;
+        state.sensor.ac_performance_target_c = state.sensor.temp_target;
+        state.sensor.ac_performance_started_ms = 0;
         state.sensor.projector_on = false;
         state.sensor.light_on = true;
         state.sensor.human_presence = true;
@@ -91,6 +107,7 @@ void data_load_dummy(BuildingState& state) {
         state.sensor.proj_lux_baseline_valid = false;
         memset(state.sensor.proj_lux_baseline, 0, sizeof(state.sensor.proj_lux_baseline));
         memset(state.sensor.proj_lux_baseline_channel_valid, 0, sizeof(state.sensor.proj_lux_baseline_channel_valid));
+        state.sensor.proj_lux_source_key = 0;
         state.sensor.proj_warmup_timer_ms = 0;
         state.sensor.proj_warning_until_ms = 0;
         state.sensor.proj_retry_count = 0;
@@ -192,6 +209,8 @@ void data_load_dummy(BuildingState& state) {
         state.rs485.light_command_requested = false;
         state.rs485.light_command_on = false;
         state.rs485.light_command_channel = 0;
+        state.rs485.light_state_publish_pending = false;
+        state.rs485.light_command_failed = false;
         state.rs485.ac_command_requested = false;
         state.rs485.ac_command_power = false;
         state.rs485.ac_command_target_c = state.sensor.temp_target;

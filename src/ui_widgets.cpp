@@ -345,7 +345,7 @@ void drawLargeControlButton(int x, int y, int w, int h, const char* label, bool 
     } else if (subtext && (strcmp(subtext, "FAIL") == 0 || strcmp(subtext, "CHK PROJ") == 0)) {
         border = COLOR_STAT_ERR; // Red
         fill = p_engine->color565(48, 10, 10);     // Red-ish fill
-    } else if (subtext && (strcmp(subtext, "CHK LUX") == 0 || strcmp(subtext, "NO LUX") == 0)) {
+    } else if (subtext && strcmp(subtext, "CHK LUX") == 0) {
         border = COLOR_STAT_WARN;
         fill = p_engine->color565(48, 34, 10);
     }
@@ -366,9 +366,12 @@ void drawLargeControlButton(int x, int y, int w, int h, const char* label, bool 
         } else if (strcmp(subtext, "FAIL") == 0 || strcmp(subtext, "CHK PROJ") == 0) {
             p_engine->setTextColor(COLOR_STAT_ERR);
             p_engine->drawString("CHK PROJ", x + w / 2, y + h / 2 + 22);
-        } else if (strcmp(subtext, "CHK LUX") == 0 || strcmp(subtext, "NO LUX") == 0) {
+        } else if (strcmp(subtext, "CHK LUX") == 0) {
             p_engine->setTextColor(COLOR_STAT_WARN);
             p_engine->drawString(subtext, x + w / 2, y + h / 2 + 22);
+        } else if (strcmp(subtext, "NO LUX") == 0) {
+            p_engine->setTextColor(COLOR_STAT_ERR);
+            p_engine->drawString("NO LUX", x + w / 2, y + h / 2 + 22);
         } else {
             p_engine->setTextColor(on ? COLOR_STAT_ON : COLOR_TEXT_SEC);
             p_engine->drawString(subtext, x + w / 2, y + h / 2 + 22);

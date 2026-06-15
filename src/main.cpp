@@ -17,6 +17,70 @@
 #define ENABLE_DUMMY_RS485_SLAVE 0
 
 static const uint64_t DUMMY_RS485_MAC = 0xD00D00000123ULL;
+static const uint32_t AC_PERFORMANCE_WINDOW_MS = 30UL * 60UL * 1000UL;
+static const float AC_PERFORMANCE_MIN_START_GAP_C = 2.0f;
+static const float AC_PERFORMANCE_MIN_DROP_C = 0.5f;
+static const float AC_PERFORMANCE_TARGET_RESET_DELTA_C = 0.5f;
+
+static bool dashboard_average_temp_locked(const BuildingState& state, float& average_c) {
+    float sum = 0.0f;
+    uint8_t count = 0;
+    for (uint8_t i = 0; i < DASHBOARD_TEMP_SLOTS; i++) {
+        if (!state.rs485.dashboard.temp_valid[i]) continue;
+        sum += state.rs485.dashboard.temp[i];
+        count++;
+    }
+    if (count == 0) return false;
+    average_c = sum / count;
+    return true;
+}
+
+static bool update_ac_performance_monitor_locked(BuildingState& state, uint32_t now) {
+    float room_temp_c = -100.0f;
+    bool temp_valid = dashboard_average_temp_locked(state, room_temp_c);
+    bool ac_available = state.rs485.dashboard.ac_available;
+    bool should_monitor = state.sensor.ac_on && ac_available && temp_valid &&
+                          room_temp_c >= state.sensor.temp_target + AC_PERFORMANCE_MIN_START_GAP_C;
+    bool target_changed =
+        fabsf(state.sensor.temp_target - state.sensor.ac_performance_target_c) >=
+        AC_PERFORMANCE_TARGET_RESET_DELTA_C;
+    bool warning_before = state.sensor.ac_performance_warning;
+
+    if (!should_monitor || target_changed) {
+        state.sensor.ac_performance_monitor_active = false;
+        state.sensor.ac_performance_started_ms = 0;
+        state.sensor.ac_performance_start_temp_c = -100.0f;
+        state.sensor.ac_performance_target_c = state.sensor.temp_target;
+        state.sensor.ac_performance_warning = false;
+        return warning_before != state.sensor.ac_performance_warning;
+    }
+
+    if (!state.sensor.ac_performance_monitor_active) {
+        state.sensor.ac_performance_monitor_active = true;
+        state.sensor.ac_performance_started_ms = now;
+        state.sensor.ac_performance_start_temp_c = room_temp_c;
+        state.sensor.ac_performance_target_c = state.sensor.temp_target;
+        Serial.printf("[AC Monitor] Started room=%.1fC target=%.1fC window=30min\n",
+                      room_temp_c, state.sensor.temp_target);
+        return warning_before != state.sensor.ac_performance_warning;
+    }
+
+    if (now - state.sensor.ac_performance_started_ms >= AC_PERFORMANCE_WINDOW_MS) {
+        float drop_c = state.sensor.ac_performance_start_temp_c - room_temp_c;
+        state.sensor.ac_performance_warning = drop_c < AC_PERFORMANCE_MIN_DROP_C;
+        Serial.printf("[AC Monitor] Window done start=%.1fC now=%.1fC drop=%.1fC warning=%s\n",
+                      state.sensor.ac_performance_start_temp_c,
+                      room_temp_c,
+                      drop_c,
+                      state.sensor.ac_performance_warning ? "YES" : "NO");
+
+        // Start a fresh rolling window while cooling is still expected.
+        state.sensor.ac_performance_started_ms = now;
+        state.sensor.ac_performance_start_temp_c = room_temp_c;
+    }
+
+    return warning_before != state.sensor.ac_performance_warning;
+}
 
 static void apply_dummy_rs485_slave(bool enabled) {
     data_lock(g_state);
@@ -206,6 +270,7 @@ void Task_Net(void* pvParameters) {
             bool trigger_schedule_ac_on = false;
             bool trigger_schedule_light_on = false;
             bool trigger_schedule_publish = false;
+            bool ac_performance_warning_changed = false;
             float target_temp = 23.0f;
             uint8_t fan_speed = 0;
             uint8_t swing_mode = 0;
@@ -218,6 +283,11 @@ void Task_Net(void* pvParameters) {
             }
             if (g_state.sensor.light_on || g_state.sensor.ac_on) {
                 g_state.sensor.active_load_accum_sec_today++;
+            }
+
+            ac_performance_warning_changed = update_ac_performance_monitor_locked(g_state, now);
+            if (ac_performance_warning_changed) {
+                g_state.ui_needs_update = true;
             }
 
             // Scheduler Shutdown Countdown
@@ -364,7 +434,8 @@ void Task_Net(void* pvParameters) {
             if (trigger_schedule_light_on) {
                 rs485_request_light_command(true);
             }
-            if (trigger_rs485_ac_off || trigger_rs485_light_off || trigger_schedule_publish || save_needed) {
+            if (trigger_rs485_ac_off || trigger_rs485_light_off || trigger_schedule_publish ||
+                ac_performance_warning_changed || save_needed) {
                 if (save_needed) {
                     data_save_device_config(g_state);
                 }
@@ -387,7 +458,7 @@ void Task_Net(void* pvParameters) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Task_Touch: Core 1 — FT6236U I2C Capacitive Touch Polling (20ms / 50Hz)
+// Task_Touch: Core 1 — XPT2046 SPI Resistive Touch Polling (20ms / 50Hz)
 // ─────────────────────────────────────────────────────────────────────────────
 void Task_Touch(void* pvParameters) {
     int tx, ty;
@@ -491,7 +562,7 @@ void setup() {
     };
 
     screens_init(ui_cbs);  // Also calls widgets_init() which creates LGFX sprites
-    touch_init();          // FT6236U I2C init + CTP_RST toggle
+    touch_init();          // XPT2046 resistive SPI touch diagnostics
 
     rs485_task_init();     // Task_RS485 pinned to Core 0
 

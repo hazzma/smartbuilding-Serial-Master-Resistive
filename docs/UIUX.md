@@ -644,8 +644,10 @@ UI behavior:
 - `POWERING_ON` / `RETRYING` SHOULD show a pending visual state while keeping
   the command responsive.
 - `VERIFIED_ON` SHOULD render as normal ON.
-- `NO_LUX` SHOULD render as ON with a subtle warning/status cue, because the
-  command was sent but no optional BH1750/Lux feedback was available.
+- `NO_LUX` SHALL keep the normal green ON card because the command was sent and
+  Lux verification is optional. Only the `NO LUX` status text SHALL be red so
+  users can distinguish missing feedback without mistaking the projector as
+  OFF.
 - `CHECK_LUX` SHOULD render as ON with a warning cue, because at least one Lux
   channel verified ON while another expected channel was invalid or unchanged.
 - `CHECK_PROJECTOR` SHOULD render as ON with an error cue and expose Alert Bit 5,

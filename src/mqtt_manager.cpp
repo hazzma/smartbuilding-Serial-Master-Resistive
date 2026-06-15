@@ -24,7 +24,6 @@ static const uint32_t MQTT_HEARTBEAT_INTERVAL_MS = 5UL * 60UL * 1000UL;
 static const uint32_t MQTT_RUNTIME_CHECK_INTERVAL_MS = 1000;
 static const uint32_t MQTT_TEMP_BURST_INTERVAL_MS = 5000;
 static const uint32_t MQTT_TEMP_BURST_DURATION_MS = 5UL * 60UL * 1000UL;
-static const uint32_t MQTT_LUX_AFTER_LIGHT_DELAY_MS = 5000;
 
 WiFiClientSecure secureClient;
 WiFiClient       wifiClient;
@@ -427,6 +426,7 @@ static void mqtt_publish_v2_state(uint16_t flags) {
     char ac_payload[12];
     char projector_payload[8];
     char alert_payload[8];
+    bool room_lux_valid = false;
 
     data_lock(g_state);
 
@@ -448,14 +448,15 @@ static void mqtt_publish_v2_state(uint16_t flags) {
             valid_temp++;
         }
     }
-    if (valid_temp > 0) snprintf(temp_payload, sizeof(temp_payload), "%d", (int)((sum / valid_temp) + 0.5f));
-    else snprintf(temp_payload, sizeof(temp_payload), "-1");
+    if (valid_temp > 0) snprintf(temp_payload, sizeof(temp_payload), "%.1f", sum / valid_temp);
+    else temp_payload[0] = '\0';
 
     if (g_state.rs485.dashboard.co2_valid) snprintf(co2_payload, sizeof(co2_payload), "%d", g_state.rs485.dashboard.co2);
     else snprintf(co2_payload, sizeof(co2_payload), "-1");
 
-    if (g_state.rs485.dashboard.lux_valid) snprintf(lux_payload, sizeof(lux_payload), "%d", (int)g_state.rs485.dashboard.lux);
-    else snprintf(lux_payload, sizeof(lux_payload), "-1");
+    room_lux_valid = g_state.rs485.dashboard.lux_valid;
+    if (room_lux_valid) snprintf(lux_payload, sizeof(lux_payload), "%d", (int)g_state.rs485.dashboard.lux);
+    else lux_payload[0] = '\0';
 
     if (g_state.rs485.dashboard.human_presence_valid) snprintf(human_payload, sizeof(human_payload), "%u", g_state.rs485.dashboard.human_presence ? 1 : 0);
     else snprintf(human_payload, sizeof(human_payload), "-1");
@@ -466,7 +467,7 @@ static void mqtt_publish_v2_state(uint16_t flags) {
     if (slave_count > RS485_MAX_SLAVES) slave_count = RS485_MAX_SLAVES;
     for (uint8_t i = 0; i < slave_count && light_id <= 4; i++) {
         const RS485SlaveState& slave = g_state.rs485.slaves[i];
-        if (!slave.online || !(slave.enabled_mask & CAP_LIGHT_RELAY)) continue;
+        if (!(slave.enabled_mask & CAP_LIGHT_RELAY)) continue;
         uint8_t relay_count = slave.relay_count;
         if (relay_count == 0 && (slave.capability & CAP_LIGHT_RELAY)) relay_count = 1;
         if (relay_count > 2) relay_count = 2;
@@ -491,17 +492,30 @@ static void mqtt_publish_v2_state(uint16_t flags) {
     if (!g_state.rs485.dashboard.co2_valid) alert_mask |= (1 << 1);
     if (!g_state.rs485.dashboard.lux_valid) alert_mask |= (1 << 2);
     if (!g_state.rs485.dashboard.human_presence_valid) alert_mask |= (1 << 3);
-    if (!g_state.rs485.bus_ok && light_id > 1) alert_mask |= (1 << 4);
+    if (g_state.rs485.light_command_failed || (!g_state.rs485.bus_ok && light_id > 1)) {
+        alert_mask |= (1 << 4);
+    }
     if (g_state.sensor.proj_hardware_failed || (!g_state.rs485.bus_ok && g_state.rs485.dashboard.projector_available)) alert_mask |= (1 << 5);
-    if (!g_state.rs485.bus_ok && g_state.rs485.dashboard.ac_available) alert_mask |= (1 << 6);
+    if (g_state.sensor.ac_performance_warning ||
+        (!g_state.rs485.bus_ok && g_state.rs485.dashboard.ac_available)) {
+        alert_mask |= (1 << 6);
+    }
     if (g_state.sensor.light_anomaly_alert) alert_mask |= (1 << 7);
     snprintf(alert_payload, sizeof(alert_payload), "%u", alert_mask);
 
     data_unlock(g_state);
 
-    if (flags & MQTT_PUBLISH_TEMP) mqtt_publish_raw(topic_temp, temp_payload, true, "temperature");
+    if ((flags & MQTT_PUBLISH_TEMP) && valid_temp > 0) {
+        mqtt_publish_raw(topic_temp, temp_payload, true, "temperature");
+    } else if (flags & MQTT_PUBLISH_TEMP) {
+        Serial.println("[MQTT] Skip temperature publish: no valid mapped temperature; retained last-known value preserved");
+    }
     if (flags & MQTT_PUBLISH_CO2) mqtt_publish_raw(topic_co2, co2_payload, true, "co2");
-    if (flags & MQTT_PUBLISH_LUX) mqtt_publish_raw(topic_lux, lux_payload, true, "lux");
+    if ((flags & MQTT_PUBLISH_LUX) && room_lux_valid) {
+        mqtt_publish_raw(topic_lux, lux_payload, true, "room lux");
+    } else if (flags & MQTT_PUBLISH_LUX) {
+        Serial.println("[MQTT] Skip Lux publish: no valid non-projector room Lux; retained last-known value preserved");
+    }
     if (flags & MQTT_PUBLISH_HUMAN) mqtt_publish_raw(topic_human, human_payload, true, "human");
     if (flags & MQTT_PUBLISH_LED) mqtt_publish_raw(topic_led, led_payload, true, "led");
     if (flags & MQTT_PUBLISH_AC) mqtt_publish_raw(topic_ac, ac_payload, true, "ac");
@@ -511,7 +525,7 @@ static void mqtt_publish_v2_state(uint16_t flags) {
 }
 
 void mqtt_publish_state() {
-    mqtt_publish_v2_state(MQTT_PUBLISH_ALL);
+    mqtt_publish_v2_state(MQTT_PUBLISH_ALL & ~MQTT_PUBLISH_LUX);
 }
 
 static bool mqtt_parse_2digits(const char* text, uint8_t& value) {
@@ -612,17 +626,12 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
     if (strcmp(topic, topic_led) == 0) {
         bool scalar_on = false;
         if (mqtt_parse_bool_payload(payload, length, scalar_on)) {
-            if (occupied || (!presence_known && !scalar_on)) {
+            if (occupied) {
                 Serial.println("[MQTT] LED command ignored by occupancy safety");
                 return;
             }
-            data_lock(g_state);
-            g_state.sensor.light_on = scalar_on;
-            g_state.ui_needs_update = true;
-            data_unlock(g_state);
             rs485_request_light_command(scalar_on);
-            Serial.println("[MQTT] LED scalar command applied");
-            mqtt_publish_state();
+            Serial.println("[MQTT] LED scalar command queued; waiting for relay readback");
             return;
         }
 
@@ -656,19 +665,14 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
             }
             changed = true;
         }
-        if (changed && (occupied || (!presence_known && !desired_on))) {
+        if (changed && occupied) {
             changed = false;
             Serial.println("[MQTT] LED JSON command ignored by occupancy safety");
-        }
-        if (changed) {
-            g_state.sensor.light_on = desired_on;
-            g_state.ui_needs_update = true;
         }
         data_unlock(g_state);
         if (changed) {
             rs485_request_light_command(desired_on);
-            Serial.println("[MQTT] LED command applied");
-            mqtt_publish_state();
+            Serial.println("[MQTT] LED command queued; waiting for relay readback");
         }
         return;
     }
@@ -874,12 +878,11 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
                 for (JsonObject light : controls["lights"].as<JsonArray>()) {
                     if (!light["power"].isNull()) {
                         bool new_light_power = light["power"].as<bool>();
-                        if (occupied || (!presence_known && !new_light_power)) {
+                        if (occupied) {
                             Serial.println("[MQTT] Master light power command ignored by occupancy safety");
                         } else {
-                            g_state.sensor.light_on = new_light_power;
                             light_changed = true;
-                            light_power = g_state.sensor.light_on;
+                            light_power = new_light_power;
                         }
                     }
                 }
@@ -888,6 +891,7 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
             data_unlock(g_state);
             if (projector_changed) rs485_request_projector_command(projector_power);
             if (ac_changed) rs485_request_ac_command(ac_power, ac_target, 0, ac_fan, ac_swing);
+            if (light_changed) rs485_request_light_command(light_power);
         }
 
         float temp = doc["temperature"].isNull() ? -100.0f : doc["temperature"].as<float>();
@@ -996,7 +1000,7 @@ static void reconnect() {
             }
             mqtt_subscribe_v2_topics();
             mqtt_set_connected_state(true);
-            mqtt_publish_state();
+            mqtt_publish_v2_state(MQTT_PUBLISH_ALL);
         } else {
             Serial.printf("Failed (rc=%d)\n", mqttClient.state());
             mqtt_set_connected_state(false);
@@ -1025,7 +1029,6 @@ void mqtt_loop() {
         static uint32_t last_heartbeat = 0;
         static uint32_t last_temp_burst_publish = 0;
         static uint32_t temp_burst_until = 0;
-        static uint32_t lux_publish_due = 0;
         static bool snapshot_ready = false;
         static bool last_human_valid = false;
         static bool last_human = false;
@@ -1043,6 +1046,7 @@ void mqtt_loop() {
             bool ac;
             float target;
             bool projector;
+            bool light_confirmation_pending;
             data_lock(g_state);
             human_valid = g_state.rs485.dashboard.human_presence_valid;
             human = g_state.sensor.human_presence;
@@ -1050,6 +1054,8 @@ void mqtt_loop() {
             ac = g_state.sensor.ac_on;
             target = g_state.sensor.temp_target;
             projector = g_state.sensor.projector_on;
+            light_confirmation_pending = g_state.rs485.light_state_publish_pending;
+            g_state.rs485.light_state_publish_pending = false;
             data_unlock(g_state);
 
             uint16_t flags = 0;
@@ -1061,7 +1067,6 @@ void mqtt_loop() {
                 if (human_valid != last_human_valid || human != last_human) flags |= MQTT_PUBLISH_HUMAN;
                 if (led != last_led) {
                     flags |= MQTT_PUBLISH_LED;
-                    lux_publish_due = now + MQTT_LUX_AFTER_LIGHT_DELAY_MS;
                 }
                 if (ac != last_ac || target != last_target) {
                     flags |= MQTT_PUBLISH_AC;
@@ -1072,6 +1077,9 @@ void mqtt_loop() {
                 }
                 if (projector != last_projector) flags |= MQTT_PUBLISH_PROJECTOR;
             }
+            if (light_confirmation_pending) {
+                flags |= MQTT_PUBLISH_LED | MQTT_PUBLISH_ALERT;
+            }
 
             last_human_valid = human_valid;
             last_human = human;
@@ -1080,10 +1088,6 @@ void mqtt_loop() {
             last_target = target;
             last_projector = projector;
 
-            if (lux_publish_due != 0 && (int32_t)(now - lux_publish_due) >= 0) {
-                flags |= MQTT_PUBLISH_LUX;
-                lux_publish_due = 0;
-            }
             if ((int32_t)(temp_burst_until - now) > 0 &&
                 (last_temp_burst_publish == 0 || now - last_temp_burst_publish >= MQTT_TEMP_BURST_INTERVAL_MS)) {
                 flags |= MQTT_PUBLISH_TEMP;

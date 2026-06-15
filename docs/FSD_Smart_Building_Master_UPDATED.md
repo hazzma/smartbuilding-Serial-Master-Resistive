@@ -14,7 +14,7 @@
 | Framework    | Arduino (PlatformIO)               |
 | Target MCU   | ESP32-S3 N16R8                     |
 | Display      | ILI9488 3.5" (480x320, Serial SPI) |
-| Touch        | Capacitive Touch Controller (I2C)  |
+| Touch        | XPT2046 Resistive Touch (SPI)      |
 | Connectivity | WiFi + Ethernet (W5500)            |
 | Protocol     | MQTT (SSL/Non-SSL), EMQX Broker    |
 
@@ -25,7 +25,7 @@
 Firmware ini mengimplementasikan:
 
 1. HMI berbasis TFT ILI9488 3.5" 480x320 untuk monitoring gedung.
-2. Input capacitive touch via I2C.
+2. Input resistive touch via XPT2046 on the TFT SPI bus.
 3. Koneksi MQTT dual-interface: WiFi dan LAN via W5500.
 4. Manajemen jaringan: WiFi connect/reconnect, non-blocking WiFi scan, LAN config, NTP sync.
 5. Arsitektur dual-core RTOS agar rendering UI tetap responsif saat networking berjalan.
@@ -53,11 +53,15 @@ What changed:
 - MQTT subscribe SHALL use control topics such as `HD01/control/led`,
   `HD01/control/ac`, `HD01/control/projector`, and `HD01/control/schedule`.
 - LED and projector payloads SHALL be integer scalars: `1` for ON and `0` for OFF.
-- Temperature payload SHALL be one integer average Celsius value. `-1` means no valid temperature slot.
+- Temperature payload SHALL be one float average Celsius value with one decimal place. When no valid temperature slot exists, firmware SHALL skip the temperature publish, preserve the retained last-known value, and raise Alert Bit 0.
 - AC payload SHALL use the 8-digit decimal format `PPTTFFSS` for power,
   target temperature, fan speed, and swing. AC target temperature is clamped to
   `16..30` degrees Celsius.
-- Simple/general sensor payloads SHALL use integer payloads unless their specific spec says otherwise.
+- Alert Bit 6 SHALL represent AC control/bus error or a conservative
+  cooling-performance warning. Cooling performance SHALL be evaluated from room
+  temperature trend and SHALL NOT require room temperature to reach the AC
+  setpoint.
+- Simple/general sensor payloads SHALL use integer payloads unless their specific spec says otherwise; temperature uses float.
 - Alert payload SHALL use a decimal integer bitmask on `HD01/data/alert`.
 - V2.7.1 SHALL define Alert Bit 7 (`128`) as after-hours empty-room active-load
   anomaly. It SHALL NOT mean generic presence outside schedule.
@@ -65,18 +69,33 @@ What changed:
 - Server-side consumers MAY subscribe to MQTT, phrase/normalize the numeric
   payloads, and provide that processed data to Flutter. Master payloads SHALL
   stay numeric and lightweight.
-- Projector verification SHOULD use an adaptive Lux baseline learned while the
-  projector is OFF. Fixed `50 lx` delta checks are allowed only as fallback or
-  legacy behavior.
+- Projector verification SHALL use an adaptive per-channel Lux baseline learned
+  while the projector is OFF. Only Lux channels from the same slave mapped to
+  `LOGICAL_PROJECTOR_CONTROL` and exposing both Projector IR and Lux SHALL be
+  used. Lux from every other slave SHALL be ignored by projector verification.
+  A channel verifies ON when its Lux increase
+  reaches `clamp(baseline * 20%, 20 lx, 80 lx)`, or when it reaches at least
+  `1.25x` baseline with an increase of at least `15 lx`. Fixed `50 lx` delta
+  checking is legacy behavior and SHALL NOT define current verification.
 - Projector verification SHALL treat BH1750/Lux as optional. If no Lux feedback
-  is available, projector ON/OFF SHALL still work as normal IR control and the
-  UI/status SHOULD show `NO_LUX` rather than failure.
+  is available on the mapped projector slave, projector ON/OFF SHALL still work
+  as normal IR control and the UI/status SHOULD show `NO_LUX` rather than
+  waiting for Lux from another slave or reporting failure.
 - If one Lux channel verifies projector ON while another expected Lux channel is
   invalid or unchanged, projector state SHALL remain ON and the UI/status SHOULD
   show `CHECK_LUX` without raising Alert Bit 5.
 - If no Lux channel verifies projector ON after one retry, projector state SHALL
   remain ON, UI/status SHOULD show `CHECK_PROJECTOR`, and Alert Bit 5 SHOULD be
   raised for inspection.
+- Projector Lux verification SHALL confirm ON only. Projector OFF SHALL follow
+  the requested IR/control state directly without requiring a Lux decrease,
+  because sunlight and room lamps can keep ambient Lux high after projector OFF.
+- Lux from the slave mapped to `LOGICAL_PROJECTOR_CONTROL` SHALL remain local to
+  the master for projector verification and SHALL NOT be published to
+  `<class_name>/data/lux`.
+- `<class_name>/data/lux` SHALL publish only valid non-projector room Lux on the
+  MQTT connection snapshot and 5-minute heartbeat. LED changes SHALL NOT trigger
+  an additional delayed Lux publish.
 - Schedule input SHALL be server-owned and UI-less on the master. The master
   SHALL always listen to `HD01/control/schedule`.
 - `HD01/control/schedule` SHALL support a daily overwrite payload such as
@@ -93,6 +112,16 @@ What changed:
   occupancy, enough historical days, and a meaningful baseline before raising
   Alert Bit 7.
 - After an actuator command is confirmed by the target slave, the master SHALL publish the latest state again so Flutter/dashboard clients stay synchronized.
+- LED confirmation SHALL require successful relay-register write and immediate
+  Relay 1/2 readback. The master SHALL publish `HD01/data/led` from the confirmed
+  relay state and SHALL NOT publish an optimistic requested state.
+- LED confirmation SHALL NOT depend on Lux availability. Missing Lux SHALL NOT
+  block LED ON/OFF or delay relay-register confirmation.
+- Remote LED commands SHALL be blocked only when human-presence feedback is
+  valid and the room is confirmed occupied. Missing or invalid presence
+  feedback SHALL NOT silently block LED OFF.
+- Failed LED write/readback SHALL publish the last confirmed cached relay state
+  and raise Alert Bit 4 instead of publishing the requested state.
 - Slave configuration SHALL follow the v2.1 Device Profile model. Master enforces profile policy; slave remains policy-blind.
 
 Why it changed:
@@ -112,8 +141,8 @@ Implementation effect:
 
 - Rendering UI tidak boleh diblokir oleh proses networking, scan WiFi, DNS, DHCP, MQTT, atau NTP.
 - Semua akses ke shared application state (`g_state`) wajib melewati `data_lock(g_state)` dan `data_unlock(g_state)`.
-- TFT memakai bus SPI dedicated, sedangkan touch memakai bus I2C dedicated. Keduanya tidak berbagi pin data.
-- `bus_mutex` tetap menjadi guard operasi display besar agar push frame tidak saling tindih dengan operasi hardware lain yang kelak ditambahkan.
+- TFT dan XPT2046 touch berbagi bus SPI3 dengan chip-select terpisah.
+- `bus_mutex` menjadi guard agar pembacaan touch tidak bertabrakan dengan push frame display.
 - Data sensor yang kedaluwarsa (>10 detik) harus di-reset ke nilai NULL.
 
 Engineering rule:
@@ -143,14 +172,14 @@ Core 1:
     - TFT push via LovyanGFX
 
   Task_Touch
-    - Capacitive touch polling over I2C
+    - XPT2046 resistive touch polling over shared SPI3
 
 Shared:
   BuildingState g_state protected by data_mutex
 
 Hardware:
   Display: ILI9488 Serial SPI, LovyanGFX, 480x320 landscape, rotation 3 for inverted mounting
-  Touch: Capacitive Touch over I2C, SDA GPIO8, SCL GPIO9, CTP_RST GPIO3
+  Touch: XPT2046 Resistive Touch over shared SPI3, CS GPIO46, IRQ unused
   Ethernet: W5500 over dedicated SPI2_HOST
 ```
 
@@ -245,10 +274,11 @@ Pin mapping ini mengikuti hardware yang digunakan sekarang dan sudah disesuaikan
 |                        | SCK           | 6             | SPI3 clock                    |
 |                        | BL / LED      | 5             | Backlight PWM                 |
 |                        | MISO / SDO    | 4             | SPI3 MISO, optional readback  |
-| **Touch (I2C CTP)**    | SDA           | 8             | Capacitive touch I2C data     |
-|                        | SCL           | 9             | Capacitive touch I2C clock    |
-|                        | RST / CTP_RST | 3             | Touch controller reset        |
-|                        | INT / CTP_INT | -             | Not connected / unused        |
+| **Touch (XPT2046 SPI)**| CS            | 46            | Dedicated touch chip select   |
+|                        | CLK           | 6             | Shared with TFT SPI3 SCK      |
+|                        | DIN           | 7             | Shared with TFT SPI3 MOSI     |
+|                        | DO            | 4             | Shared with TFT SPI3 MISO     |
+|                        | IRQ           | -             | Not connected / polling used  |
 | **Ethernet (W5500)**   | SCK           | 12            | Dedicated SPI2_HOST           |
 |                        | MISO          | 13            | Dedicated SPI2_HOST           |
 |                        | MOSI          | 11            | Dedicated SPI2_HOST           |
@@ -260,8 +290,8 @@ Pin mapping ini mengikuti hardware yang digunakan sekarang dan sudah disesuaikan
 
 Critical:
 
-- TFT and touch no longer share data pins.
-- Do not use GPIO 3, 8, or 9 for any other runtime feature while touch is enabled.
+- TFT and touch share SPI3 data/clock pins and use separate chip-select pins.
+- GPIO46 is the XPT2046 chip select and SHALL remain HIGH/deselected during boot initialization.
 - Do not move W5500 to the TFT SPI bus unless `bus_shared` and chip-select handling are redesigned.
 - Keep TFT on SPI3_HOST and W5500 on SPI2_HOST to avoid display/network contention.
 - RS485 uses board UART0 signals exposed as `TXD0/RXD0`; do not reinterpret those labels as arbitrary GPIO numbers.
@@ -317,21 +347,21 @@ Performance notes:
 
 ### 4.4 Touch Configuration
 
-Touch hardware is capacitive I2C, not resistive ADC.
+Touch hardware is XPT2046 resistive SPI. It shares the TFT SPI3 clock/data lines and uses a dedicated chip select.
 
 Touch pin constants:
 
 ```cpp
-#define TOUCH_SDA 8
-#define TOUCH_SCL 9
-#define TOUCH_RST 3
+#define TOUCH_CS   46
+#define TOUCH_IRQ  -1
 ```
 
-Touch controller detection:
+Touch controller configuration:
 
-- Primary supported parser: FT6236U-compatible register layout at `0x38`.
-- Diagnostic detection MAY scan common CTP addresses such as `0x38`, `0x5D`, and `0x14`.
-- If a GT911-class address is detected, firmware SHALL log it clearly because GT911 requires a different coordinate parser.
+- LovyanGFX `Touch_XPT2046` is attached to the existing ILI9488 panel.
+- XPT2046 uses `SPI3_HOST`, `TFT_SCLK`, `TFT_MOSI`, and `TFT_MISO`.
+- Both panel and touch SHALL set `bus_shared = true`.
+- Touch IRQ is not connected; firmware polls the controller every 20ms.
 
 Touch runtime behavior:
 
@@ -341,16 +371,36 @@ Touch runtime behavior:
 - Scrollable surfaces MAY consume `MOVE` and `UP` for drag gestures.
 - Debounce minimum is 80ms.
 - Coordinate output SHALL be transformed to landscape 480x320.
+- Normal UI input SHALL use LovyanGFX `getTouch()` coordinate mapping. Raw
+  XPT2046 values are diagnostic-only and SHALL NOT be passed to UI handlers.
+  Mapped coordinates SHALL use signed values to avoid unsigned underflow.
+- The installed resistive overlay is rotated 180 degrees relative to the
+  display, so firmware SHALL invert only the final mapped screen coordinates:
+  `x = 479 - x` and `y = 319 - y`.
 
-Current coordinate transform:
+Initial calibration range:
 
 ```cpp
-TOUCH_SWAP_XY = true;
-TOUCH_FLIP_X  = false;
-TOUCH_FLIP_Y  = true;
-TOUCH_MAX_X   = 480;
-TOUCH_MAX_Y   = 320;
+x_min = 3900;
+x_max = 300;
+y_min = 400;
+y_max = 3900;
+offset_rotation = 0;
 ```
+
+The default XPT2046 range matches the installed touch-panel orientation. Runtime
+LovyanGFX calibration and NVS calibration storage are not used. Sending `k`
+opens a touch alignment test that displays only valid final screen coordinates
+within `0..479` and `0..319`; raw ADC values are never presented as pixels. The
+test screen SHALL label comfortably inset edge targets instead of requiring
+touches on the physical corners. The test screen SHALL have no touch BACK button;
+serial command `b` or `B` returns to the dashboard. Final mapped coordinates
+SHALL apply the measured panel correction anchors
+`X: 0->35, 223->240, 448->445` and
+`Y: 62->70, 184->180, 300->290` before reaching UI handlers.
+
+Detailed touch measurement history, deviations, active correction formulas, and
+retest procedure are documented in `docs/Calibration_TC.md`.
 
 ### 4.5 RS485 Configuration
 
@@ -415,7 +465,7 @@ Master S3/
 | :----------- | :--- | :------- | :---- | :-------------------------------------------------- |
 | `Task_Net`   | 0    | 1        | 8 KB  | WiFi scan state machine, LAN/W5500, MQTT, NTP, timeout |
 | `Task_RS485` | 0    | 1        | 4 KB  | RS485 polling, pairing, parser, retry/timeout       |
-| `Task_Touch` | 1    | 1        | 4 KB  | Capacitive touch polling over I2C (20ms / 50Hz)     |
+| `Task_Touch` | 1    | 1        | 4 KB  | XPT2046 resistive touch polling over SPI (20ms / 50Hz) |
 | `Task_UI`    | 1    | 4        | 16 KB | Sprite render + display push                        |
 
 LAN/W5500, MQTT Ethernet client, DNS, and NTP SHALL be serialized inside `Task_Net`.
@@ -789,10 +839,10 @@ Normal-user screens SHALL prefer large touch targets and short readable text. De
 Touch polling SHALL occur every 20ms (50Hz) in dedicated `Task_Touch`.
 
 **TOUCH-002**  
-Touch SHALL use I2C pins SDA GPIO8 and SCL GPIO9.
+Touch SHALL use XPT2046 on the TFT SPI3 bus with dedicated CS GPIO46.
 
 **TOUCH-003**  
-Touch reset SHALL use CTP_RST GPIO3.
+Touch IRQ SHALL be optional; the current hardware uses polling with IRQ unconnected.
 
 **TOUCH-004**  
 Touch coordinates SHALL be transformed to display-space 480x320 landscape and SHALL match display rotation `3`.
@@ -857,7 +907,7 @@ MQTT broker, port, username, password, client ID, topic prefix or per-topic conf
 MQTT Setup SHALL support selecting a saved preset or creating/editing a new preset. A preset SHALL contain all connection fields and topic fields needed to reconnect without recompiling firmware.
 
 **NET-018**  
-MQTT publish behavior SHALL follow Firmware V2 per-topic publishing. Each data type SHALL publish to its own configured topic. Simple/general sensor topics SHALL use integer payloads; temperature SHALL publish one integer average Celsius value; LED and projector SHALL publish integer `1` or `0`; AC SHALL use `PPTTFFSS` for power, target temperature, fan speed, and swing.
+MQTT publish behavior SHALL follow Firmware V2 per-topic publishing. Each data type SHALL publish to its own configured topic. Simple/general sensor topics SHALL use integer payloads except temperature; temperature SHALL publish one float average Celsius value with one decimal place; LED and projector SHALL publish integer `1` or `0`; AC SHALL use `PPTTFFSS` for power, target temperature, fan speed, and swing.
 
 **NET-019**  
 MQTT subscribe behavior SHALL support actuator command topics for LED, AC, projector, and other mapped controls. Remote commands SHALL be forwarded to the target slave device. After the target slave confirms the new state, firmware SHALL publish/update the related state topic for Flutter/dashboard synchronization.
@@ -946,7 +996,7 @@ WiFi scan SHALL be advanced only from Task_Net, never from UI/touch handlers.
 | 1 | SHALL NOT use `delay()` inside Task_UI, Task_Touch, or Task_Net loops. |
 | 2 | SHALL NOT hold `data_lock` during WiFi, MQTT, LAN, I2C, SPI, Serial, or filesystem calls. |
 | 3 | SHALL NOT render directly to `tft` object; always use the DisplayEngine/Sprite path. |
-| 4 | SHALL NOT use GPIO 3, 8, or 9 for non-touch features while CTP is enabled. |
+| 4 | XPT2046 touch CS SHALL pass the boot-time HIGH/LOW output diagnostic before touch input is considered operational. |
 | 5 | SHALL NOT call blocking `WiFi.scanNetworks()` without async flag. |
 | 6 | SHALL NOT call `WiFi.begin()` from the scan screen until the user explicitly chooses CONNECT. |
 | 7 | SHALL NOT create additional Core 1 tasks with priority > 1. |
@@ -981,7 +1031,7 @@ WiFi scan SHALL be advanced only from Task_Net, never from UI/touch handlers.
 - MQTT credentials, topics, presets, TLS mode, and device name SHALL be stored in ESP32 NVS/Preferences, not hardcoded as the only production path.
 - All task communication SHALL go through `g_state`; no direct UI-to-network blocking call.
 - TFT and W5500 SHALL stay on separate SPI hosts.
-- Touch SHALL stay on I2C GPIO8/GPIO9 with reset on GPIO3.
+- Touch SHALL share TFT SPI3 GPIO6/GPIO7/GPIO4 and use GPIO46 only as XPT2046 CS.
 - RS485 UART SHALL use board `TX/RX` symbols mapped to `TXD0/RXD0`, not manually guessed GPIO numbers.
 - Slave Manager UI SHALL not block waiting for discovery or pairing responses.
 
@@ -1003,7 +1053,7 @@ What changed:
 - Exact subscribe topics for class `HD01`: `HD01/control/led`, `HD01/control/ac`, `HD01/control/projector`, and `HD01/control/schedule`.
 - Simple/general sensor payloads SHALL be integer values.
 - LED and projector payloads SHALL be integer scalars, `1` for ON and `0` for OFF.
-- Temperature payload SHALL be one integer average Celsius value. `-1` means unavailable/no valid slot.
+- Temperature payload SHALL be one float average Celsius value with one decimal place. When unavailable/no valid slot exists, firmware SHALL skip publishing temperature and preserve the retained last-known value; Alert Bit 0 reports invalid temperature.
 - AC payload SHALL use `PPTTFFSS` because it carries power, target temperature,
   fan speed, and swing in one compact value.
 - Alert payload SHALL use a decimal integer bitmask.
@@ -1156,9 +1206,9 @@ class `HD01`.
 
 | Example publish/state topic label | Payload rule | Purpose |
 |---|---|---|
-| `HD01/data/temp` | Integer | Average temperature in Celsius. `-1` means no valid temperature slot. |
+| `HD01/data/temp` | Float | Average temperature in Celsius with one decimal place, for example `27.4`. Publish is skipped while invalid so retained last-known data is preserved; Alert Bit 0 reports invalid temperature. |
 | `HD01/data/co2` | Integer | CO2 ppm value. |
-| `HD01/data/lux` | Integer | Lux value when available. |
+| `HD01/data/lux` | Integer | Valid non-projector room Lux, published on connection snapshot and 5-minute heartbeat only. Projector-verification Lux is local-only. |
 | `HD01/data/human` | Integer | Presence state such as `0` or `1`. |
 | `HD01/data/led` | Integer | `1` if LED is ON, `0` if LED is OFF. |
 | `HD01/data/projector` | Integer | `1` if projector is ON, `0` if projector is OFF. |
@@ -1170,7 +1220,7 @@ What changed: this replaces the previous single combined state JSON as the prima
 
 Why it changed: each app screen or dashboard widget can subscribe only to the data it displays.
 
-Implementation effect: firmware must publish simple sensors, temperature average, LED state, and projector state as integers; AC uses `PPTTFFSS` for multi-field control state.
+Implementation effect: firmware must publish simple sensors, LED state, and projector state as integers; temperature average is a one-decimal float; AC uses `PPTTFFSS` for multi-field control state.
 
 Direction rule: Firmware V2.5 publishes actuator state under `data` and
 subscribes to commands under `control`, so self-echo guards are no longer part
@@ -1254,7 +1304,7 @@ firmware_version: 1.0.0
 
 Legacy compatibility note: if a development build still uses the same topic for publish and subscribe, firmware SHALL ignore payloads with `type = smart_building_master_state` when they arrive through the subscribe callback.
 
-For the legacy combined JSON only, invalid or unavailable sensor values SHALL be encoded as `null`, not fake numeric placeholders. For Firmware V2 per-topic integer payloads, invalid/stale handling SHALL be represented by topic staleness, retained-state policy, or a documented sentinel in the MQTT spec before implementation. RS485 slave contract v2.1 supports Relay 1-2 per slave at `0x010D..0x010E`; the MQTT/UI model may still expose up to 4 logical lamp channels when the master maps relays from multiple slaves or future hardware into LED positions.
+For the legacy combined JSON only, invalid or unavailable sensor values SHALL be encoded as `null`, not fake numeric placeholders. For Firmware V2 per-topic numeric payloads, invalid/stale handling SHALL be represented by topic staleness, retained-state policy, or a documented sentinel in the MQTT spec before implementation. RS485 slave contract v2.1 supports Relay 1-2 per slave at `0x010D..0x010E`; the MQTT/UI model may still expose up to 4 logical lamp channels when the master maps relays from multiple slaves or future hardware into LED positions.
 
 Publish triggers:
 - periodic publish using configured interval
@@ -1383,7 +1433,7 @@ Class topic effect:
 ## 11. Implementation Roadmap
 
 - [x] Migrate FSD from parallel display to current Serial SPI ILI9488 hardware.
-- [x] Document capacitive touch I2C pinout and behavior.
+- [x] Document XPT2046 resistive SPI touch pinout and behavior.
 - [x] Specify non-blocking WiFi scan flags and state machine.
 - [x] Add WiFi scan fields to `NetworkState`.
 - [x] Implement `wifi_manager_scan_request()`.
@@ -1442,9 +1492,8 @@ Runtime pin config:
 #define TFT_BL    5
 #define TFT_MISO  4
 
-#define TOUCH_SDA 8
-#define TOUCH_SCL 9
-#define TOUCH_RST 3
+#define TOUCH_CS   46
+#define TOUCH_IRQ  -1
 
 #define LAN_SCK   12
 #define LAN_MISO  13
