@@ -151,6 +151,20 @@ slave yang sama dibatasi minimal setiap `10 detik`.
 Slave tidak reboot, sehingga slave **tetap memakai saved assigned address** dan
 tidak kembali ke `247`.
 
+Aturan alamatnya sederhana:
+
+| Kondisi | Master mengirim ke | Slave mendengarkan di | Hasil |
+|---|---:|---:|---|
+| Kabel terlepas, polling normal | `0x03` sebagai contoh assigned address | `0x03`, tetapi kabel terputus | Gagal karena jalur fisik putus |
+| Kabel terlepas, auto-recovery berkala | `247` | `0x03` | Gagal karena alamat berbeda dan kabel terputus |
+| Kabel sudah dipasang, auto-recovery ke `247` | `247` | `0x03` | Tetap gagal karena alamat berbeda |
+| Kabel sudah dipasang, polling normal berikutnya | `0x03` | `0x03` | Berhasil, slave kembali online |
+
+Jadi master **tidak menemukan slave melalui Discover** pada skenario ini.
+Master sudah mengetahui alamat `0x03` dari registry dan terus mencoba alamat
+tersebut melalui polling normal. Slave baru terbaca kembali ketika request
+polling dan alamat yang didengarkan slave sama-sama `0x03`.
+
 ```text
 Kabel dicabut
   |
@@ -177,6 +191,19 @@ Master clear consecutive_fail dan slave kembali online
 Kasus ini tidak membutuhkan Discover atau pairing ulang. Waktu reconnect setelah
 kabel dipasang kembali secara nominal sekitar `1 detik` untuk satu entry, atau
 hingga sekitar `jumlah entry x 1 detik` sebelum slave mendapat giliran lagi.
+
+### Jangan Campur Tiga Istilah Ini
+
+| Istilah | Dipicu oleh | Tujuan | Bisa membuat kabel-reconnect berhasil? |
+|---|---|---|---|
+| **Polling normal** | Otomatis setiap giliran registry | Membaca assigned address seperti `0x03` | **Ya**, karena powered slave masih di `0x03` |
+| **Auto-recovery** | Known slave terlihat lost/offline | Memulihkan known slave yang reboot dan kembali ke `247` | Tidak pada kasus kabel-only, karena slave masih di `0x03` |
+| **Discover/pairing** | User menekan Discover atau command debug pairing | Mencari dan mendaftarkan unknown slave di `247` | Tidak digunakan pada kasus kabel-only |
+
+Auto-recovery request ke `247` boleh tetap terlihat di log ketika kabel putus.
+Itu hanya percobaan recovery defensif dan **bukan bukti bahwa master menemukan
+slave**. Pada kasus kabel-only, request tersebut gagal. Reconnect yang benar
+terjadi lewat polling assigned address berikutnya.
 
 ## Flow Normal Boot
 
@@ -367,8 +394,9 @@ Setiap 1000 ms proses 1 slave registry
   +--> Ada known slave offline/lost
   |       |
   |       v
+  |     Master tetap mendapat giliran polling ke address saved
   |     Jika sudah lewat 10 detik dari recovery terakhir:
-  |       kirim recovery ke 247
+  |       master juga mencoba recovery ke 247
   |
   +--> Ada known slave online
           |
@@ -377,6 +405,13 @@ Setiap 1000 ms proses 1 slave registry
 ```
 
 Jadi master yang "diam" tetap kerja untuk known slave, tapi bukan auto-discover device asing.
+
+Untuk known slave offline, polling saved address dan percobaan recovery `247`
+berjalan sebagai dua jalur berbeda:
+
+- Jika slave tetap hidup di saved address, polling normal yang akan berhasil.
+- Jika slave sempat reboot dan kembali ke `247`, auto-recovery yang akan
+  memindahkannya ke saved address, lalu polling normal dilanjutkan.
 
 ## Flow Discover
 
@@ -557,7 +592,26 @@ Kalau terlihat langsung ke address lama, cek:
 
 ```text
 Tidak untuk unknown slave.
-Ya untuk recovery known slave yang offline/lost, tiap 10 detik.
+Master hanya mencoba recovery known slave yang offline/lost tiap 10 detik.
+Recovery bukan Discover.
+```
+
+### "Kalau kabel dicabut lalu dipasang lagi, kok bisa terbaca?"
+
+```text
+Slave tidak pindah address.
+Slave tetap di assigned address, misalnya 0x03.
+Master juga tetap menyimpan dan polling 0x03.
+
+Saat kabel terputus:
+poll 0x03 gagal.
+
+Saat kabel tersambung:
+poll 0x03 berikutnya berhasil.
+
+Bukan Discover.
+Bukan recovery 247.
+Hanya request dan response pada address lama yang akhirnya tersambung lagi.
 ```
 
 ### "Kenapa slave muncul otomatis tanpa klik Discover?"

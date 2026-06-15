@@ -647,6 +647,10 @@ Timing interpretation:
 - A powered slave that only loses its RS485 cable remains on its assigned
   address and reconnects through normal polling. Address-247 recovery is mainly
   needed after a known RAM-only slave reboots.
+- A recovery attempt sent to address `247` while that powered slave still
+  listens on its assigned address will fail. It is not discovery and is not the
+  action that reconnects the cable-only case. Reconnection occurs when the next
+  normal poll targets the slave's unchanged assigned address.
 
 ---
 
