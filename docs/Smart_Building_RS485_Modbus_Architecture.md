@@ -651,6 +651,10 @@ Timing interpretation:
   listens on its assigned address will fail. It is not discovery and is not the
   action that reconnects the cable-only case. Reconnection occurs when the next
   normal poll targets the slave's unchanged assigned address.
+- In the cable-only case, each registry turn polls the assigned address first.
+  Only after that poll fails may the same turn attempt address-247 recovery when
+  its per-slave 10-second limiter is due. A successful assigned-address poll
+  ends the turn without attempting recovery.
 
 ---
 

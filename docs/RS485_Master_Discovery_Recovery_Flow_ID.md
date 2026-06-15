@@ -153,12 +153,33 @@ tidak kembali ke `247`.
 
 Aturan alamatnya sederhana:
 
-| Kondisi | Master mengirim ke | Slave mendengarkan di | Hasil |
-|---|---:|---:|---|
-| Kabel terlepas, polling normal | `0x03` sebagai contoh assigned address | `0x03`, tetapi kabel terputus | Gagal karena jalur fisik putus |
-| Kabel terlepas, auto-recovery berkala | `247` | `0x03` | Gagal karena alamat berbeda dan kabel terputus |
-| Kabel sudah dipasang, auto-recovery ke `247` | `247` | `0x03` | Tetap gagal karena alamat berbeda |
-| Kabel sudah dipasang, polling normal berikutnya | `0x03` | `0x03` | Berhasil, slave kembali online |
+Untuk kasus kabel-only, urutan setiap giliran slave selalu dimulai dari assigned
+address:
+
+1. Master mencoba polling assigned address `0x03`.
+2. Jika `0x03` berhasil, giliran selesai. Master tidak mencoba `247`.
+3. Jika `0x03` gagal, master mengecek apakah recovery `10 detik` sudah boleh
+   dicoba.
+4. Jika belum 10 detik, giliran selesai setelah kegagalan `0x03`.
+5. Jika sudah boleh, master menulis recovery ke `247`, lalu mencoba konfirmasi
+   kembali ke `0x03`.
+
+Jadi urutan request dalam satu giliran yang menjalankan recovery adalah:
+
+```text
+poll 0x03 gagal
+  -> recovery write ke 247 gagal/tidak cocok
+  -> recovery confirm ke 0x03 gagal
+  -> giliran selesai
+```
+
+Saat kabel sudah dipasang kembali, urutannya menjadi:
+
+```text
+poll 0x03 berhasil
+  -> slave langsung online
+  -> tidak lanjut recovery ke 247
+```
 
 Jadi master **tidak menemukan slave melalui Discover** pada skenario ini.
 Master sudah mengetahui alamat `0x03` dari registry dan terus mencoba alamat
@@ -169,23 +190,39 @@ polling dan alamat yang didengarkan slave sama-sama `0x03`.
 Kabel dicabut
   |
   v
-Master tetap poll assigned address + satu retry
+GILIRAN SLAVE DIMULAI
   |
   v
-Failed attempt naik, slave dapat menjadi degraded/offline
+Master poll 0x03 + satu retry
+  |
+  +--> BERHASIL
+  |      Slave online, giliran selesai
+  |
+  +--> GAGAL
+         Failed attempt naik
+         Slave dapat menjadi degraded/offline
+         |
+         +--> Recovery 10 detik belum due
+         |      Giliran selesai
+         |
+         +--> Recovery 10 detik sudah due
+                Write recovery ke 247
+                Confirm kembali ke 0x03
+                Tetap gagal selama kabel terputus
+
+Kabel dipasang kembali
   |
   v
-Master sesekali mencoba recovery ke 247, tetapi gagal karena slave masih di
-assigned address
+GILIRAN SLAVE BERIKUTNYA
   |
   v
-Kabel dipasang lagi
+Master poll 0x03
   |
   v
-Polling assigned address berikutnya berhasil
+Slave menjawab, master clear consecutive_fail dan slave online
   |
   v
-Master clear consecutive_fail dan slave kembali online
+Giliran selesai tanpa mencoba 247
 ```
 
 Kasus ini tidak membutuhkan Discover atau pairing ulang. Waktu reconnect setelah
@@ -204,6 +241,12 @@ Auto-recovery request ke `247` boleh tetap terlihat di log ketika kabel putus.
 Itu hanya percobaan recovery defensif dan **bukan bukti bahwa master menemukan
 slave**. Pada kasus kabel-only, request tersebut gagal. Reconnect yang benar
 terjadi lewat polling assigned address berikutnya.
+
+Pengecualian urutan hanya terjadi saat boot master dengan saved slave yang
+`last_seen == 0` dan offline. Pada kondisi boot tersebut, master memang mencoba
+recovery `247` lebih dulu karena slave RAM-only diasumsikan baru reboot dan
+kembali ke `247`. Pengecualian ini tidak berlaku setelah kabel-only terputus
+dalam sesi master yang masih berjalan.
 
 ## Flow Normal Boot
 
