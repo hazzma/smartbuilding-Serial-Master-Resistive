@@ -2511,7 +2511,9 @@ void handle_dashboard_touch(BuildingState& state, int tx, int ty) {
             } else if (model.has_ac) {
                 ac_rect = {252, 72, 204, 104};
             }
-            if (model.has_ac && model.has_projector && !model.has_led) {
+            if (dashboard_is_full_control_layout(model)) {
+                // Already assigned above
+            } else if (model.has_ac && model.has_projector && !model.has_led) {
                 // Rects are assigned above for the dedicated elderly-friendly layout.
             } else if (model.has_projector && model.has_led) {
                 projector_rect = {24, 190, 204, 104};
