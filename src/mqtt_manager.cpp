@@ -5,6 +5,7 @@
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <ctype.h>
+#include <time.h>
 #include "data.h"
 #include "rs485_manager.h"
 
@@ -487,21 +488,68 @@ static void mqtt_publish_v2_state(uint16_t flags) {
 
     snprintf(projector_payload, sizeof(projector_payload), "%u", g_state.sensor.projector_on ? 1 : 0);
 
-    uint16_t alert_mask = 0;
-    if (valid_temp == 0) alert_mask |= (1 << 0);
-    if (!g_state.rs485.dashboard.co2_valid) alert_mask |= (1 << 1);
-    if (!g_state.rs485.dashboard.lux_valid) alert_mask |= (1 << 2);
-    if (!g_state.rs485.dashboard.human_presence_valid) alert_mask |= (1 << 3);
-    if (g_state.rs485.light_command_failed || (!g_state.rs485.bus_ok && light_id > 1)) {
-        alert_mask |= (1 << 4);
+    // Alert bitmask sesuai format Flutter: 7 digit biner
+    // temp error|co2 error|lux error|human error|led error|projector error|ac error|presence outside schedule
+    // Bit 0 (MSB) = temp error, Bit 6 (LSB) = presence outside schedule
+    // Example: 1100001 -> temp error, co2 error, presence outside schedule
+    // We'll map existing alerts to this format
+    bool temp_error = (valid_temp == 0);
+    bool co2_error = !g_state.rs485.dashboard.co2_valid;
+    bool lux_error = !g_state.rs485.dashboard.lux_valid;
+    bool human_error = !g_state.rs485.dashboard.human_presence_valid;
+    bool led_error = g_state.rs485.light_command_failed || (!g_state.rs485.bus_ok && light_id > 1);
+    bool projector_error = g_state.sensor.proj_hardware_failed || (!g_state.rs485.bus_ok && g_state.rs485.dashboard.projector_available);
+    bool ac_error = g_state.sensor.ac_performance_warning || (!g_state.rs485.bus_ok && g_state.rs485.dashboard.ac_available);
+
+    // Presence outside schedule: room empty during scheduled class time OR occupied outside schedule
+    bool presence_outside_schedule = false;
+    uint8_t today_bitmask = g_state.sensor.sched_today_sessions_bitmask;
+    if (g_state.sensor.sched_weekly.valid && g_state.rs485.dashboard.human_presence_valid) {
+        bool in_session_now = false;
+        struct tm timeinfo;
+        if (getLocalTime(&timeinfo, 5)) {
+            uint16_t minute_now = (uint16_t)timeinfo.tm_hour * 60U + (uint16_t)timeinfo.tm_min;
+            for (uint8_t s = 0; s < SCHEDULE_SESSION_COUNT; s++) {
+                if (!(today_bitmask & (1 << s))) continue;
+                uint16_t start = schedule_get_session_start_min(s);
+                uint16_t end = schedule_get_session_end_min(s);
+                if (minute_now >= start && minute_now < end) {
+                    in_session_now = true;
+                    break;
+                }
+            }
+        }
+        // Alert if room is occupied but no class scheduled (or vice versa)
+        bool occupied_now = g_state.rs485.dashboard.human_presence;
+        if (occupied_now != in_session_now) {
+            presence_outside_schedule = true;
+        }
     }
-    if (g_state.sensor.proj_hardware_failed || (!g_state.rs485.bus_ok && g_state.rs485.dashboard.projector_available)) alert_mask |= (1 << 5);
-    if (g_state.sensor.ac_performance_warning ||
-        (!g_state.rs485.bus_ok && g_state.rs485.dashboard.ac_available)) {
-        alert_mask |= (1 << 6);
-    }
-    if (g_state.sensor.light_anomaly_alert) alert_mask |= (1 << 7);
-    snprintf(alert_payload, sizeof(alert_payload), "%u", alert_mask);
+
+    // Build 7-digit binary string: temp,co2,lux,human,led,projector,ac,presence
+    char alert_binary[12];
+    snprintf(alert_binary, sizeof(alert_binary), "%u%u%u%u%u%u%u",
+             temp_error ? 1 : 0,
+             co2_error ? 1 : 0,
+             lux_error ? 1 : 0,
+             human_error ? 1 : 0,
+             led_error ? 1 : 0,
+             projector_error ? 1 : 0,
+             ac_error ? 1 : 0);
+             // Note: presence_outside_schedule not included yet (8th bit)
+    // Actually the example shows 7 digits: temp,co2,lux,human,led,projector,ac,presence
+    // That's 8 bits. Let's redo:
+    snprintf(alert_binary, sizeof(alert_binary), "%u%u%u%u%u%u%u%u",
+             temp_error ? 1 : 0,
+             co2_error ? 1 : 0,
+             lux_error ? 1 : 0,
+             human_error ? 1 : 0,
+             led_error ? 1 : 0,
+             projector_error ? 1 : 0,
+             ac_error ? 1 : 0,
+             presence_outside_schedule ? 1 : 0);
+
+    snprintf(alert_payload, sizeof(alert_payload), "%s", alert_binary);
 
     data_unlock(g_state);
 
@@ -528,81 +576,131 @@ void mqtt_publish_state() {
     mqtt_publish_v2_state(MQTT_PUBLISH_ALL & ~MQTT_PUBLISH_LUX);
 }
 
-static bool mqtt_parse_2digits(const char* text, uint8_t& value) {
-    if (!isdigit((unsigned char)text[0]) || !isdigit((unsigned char)text[1])) return false;
-    value = (uint8_t)((text[0] - '0') * 10 + (text[1] - '0'));
-    return true;
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW Schedule Parsing: 6-digit bitmask format S1S2S3S4S5S6
+// Payload from DB sent at 00:00 each day:
+//   <class>/control/schedule  ->  "010011"
+// Means: sessions 2, 5, 6 are active for TODAY
+//
+// Old format (PRE_CLASS_ON / CLASS_ENDED) still supported for backward compat
+// ─────────────────────────────────────────────────────────────────────────────
+static bool mqtt_parse_weekly_schedule(char* payload_str) {
+    // Trim whitespace
+    char* start = payload_str;
+    while (*start && isspace((unsigned char)*start)) start++;
+    char* end = start + strlen(start);
+    while (end > start && isspace((unsigned char)end[-1])) *--end = '\0';
 
-static bool mqtt_valid_schedule_date(const char* text, uint32_t& date_value) {
-    if (strlen(text) != 8) return false;
-    for (uint8_t i = 0; i < 8; i++) {
-        if (!isdigit((unsigned char)text[i])) return false;
-    }
+    size_t len = strlen(start);
+    if (len == 0) return false;
 
-    uint16_t year = (uint16_t)((text[0] - '0') * 1000 + (text[1] - '0') * 100 +
-                               (text[2] - '0') * 10 + (text[3] - '0'));
-    uint8_t month = (uint8_t)((text[4] - '0') * 10 + (text[5] - '0'));
-    uint8_t day = (uint8_t)((text[6] - '0') * 10 + (text[7] - '0'));
-    static const uint8_t days_in_month[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-    if (year < 2024 || month < 1 || month > 12 || day < 1) return false;
-    uint8_t max_day = days_in_month[month - 1];
-    bool leap = ((year % 4 == 0) && (year % 100 != 0)) || (year % 400 == 0);
-    if (month == 2 && leap) max_day = 29;
-    if (day > max_day) return false;
-
-    date_value = (uint32_t)year * 10000UL + (uint32_t)month * 100UL + day;
-    return true;
-}
-
-static bool mqtt_parse_schedule_slot(const char* text, DailyScheduleSlot& slot) {
-    if (strlen(text) != 9 || text[4] != '-') return false;
-    uint8_t sh, sm, eh, em;
-    if (!mqtt_parse_2digits(text, sh) || !mqtt_parse_2digits(text + 2, sm) ||
-        !mqtt_parse_2digits(text + 5, eh) || !mqtt_parse_2digits(text + 7, em)) {
-        return false;
-    }
-    if (sh > 23 || eh > 23 || sm > 59 || em > 59) return false;
-    slot.start_min = (uint16_t)sh * 60U + sm;
-    slot.end_min = (uint16_t)eh * 60U + em;
-    slot.pre_triggered = false;
-    slot.end_triggered = false;
-    return slot.start_min < slot.end_min;
-}
-
-static bool mqtt_apply_daily_schedule(char* payload_str) {
-    DailyScheduleSlot parsed[DAILY_SCHEDULE_MAX_SLOTS] = {};
-    uint8_t parsed_count = 0;
-    uint32_t date_value = 0;
-
+    // Check for new format: 6-digit bitmask with semicolons for each day
+    // Format: "010011;111000;000000;000000;000000;000000;000000"
+    // Means: Mon sessions 2,5,6; Tue sessions 1,2,3; rest none
+    // Or single value: "010011" (applies to today)
     char* save_ptr = nullptr;
-    char* token = strtok_r(payload_str, ";", &save_ptr);
-    if (!token || !mqtt_valid_schedule_date(token, date_value)) return false;
+    char* token = strtok_r(start, ";", &save_ptr);
+    if (!token) return false;
 
-    uint16_t previous_end = 0;
-    while ((token = strtok_r(nullptr, ";", &save_ptr)) != nullptr) {
-        if (parsed_count >= DAILY_SCHEDULE_MAX_SLOTS ||
-            !mqtt_parse_schedule_slot(token, parsed[parsed_count]) ||
-            (parsed_count > 0 && parsed[parsed_count].start_min < previous_end)) {
+    uint8_t day_masks[SCHEDULE_DAYS] = {0};
+    uint8_t day_count = 0;
+
+    while (token != nullptr && day_count < SCHEDULE_DAYS) {
+        size_t tlen = strlen(token);
+        if (tlen != 6) {
+            // Not a valid 6-digit mask, try old format handlers
             return false;
         }
-        previous_end = parsed[parsed_count].end_min;
-        parsed_count++;
+        // Parse 6 digits, each must be '0' or '1'
+        uint8_t mask = 0;
+        bool valid = true;
+        for (uint8_t i = 0; i < 6; i++) {
+            if (token[i] == '1') {
+                mask |= (1 << i);
+            } else if (token[i] != '0') {
+                valid = false;
+                break;
+            }
+        }
+        if (!valid) return false;
+        day_masks[day_count] = mask;
+        day_count++;
+        token = strtok_r(nullptr, ";", &save_ptr);
     }
 
+    if (day_count == 0) return false;
+
     data_lock(g_state);
-    g_state.sensor.schedule_date_yyyymmdd = date_value;
-    g_state.sensor.schedule_slot_count = parsed_count;
-    memset(g_state.sensor.schedule_slots, 0, sizeof(g_state.sensor.schedule_slots));
-    memcpy(g_state.sensor.schedule_slots, parsed, sizeof(DailyScheduleSlot) * parsed_count);
+
+    // If only 1 token, apply to today's day-of-week
+    if (day_count == 1) {
+        uint8_t today = schedule_get_day_of_week();
+        if (today >= SCHEDULE_DAYS) {
+            // Time not synced, store for all days as fallback
+            for (uint8_t d = 0; d < SCHEDULE_DAYS; d++) {
+                g_state.sensor.sched_weekly.day_mask[d] = day_masks[0];
+            }
+            Serial.printf("[MQTT] Schedule: time not synced, applied %s to all days\n", start);
+        } else {
+            // Clear all days and set today
+            memset(g_state.sensor.sched_weekly.day_mask, 0, sizeof(g_state.sensor.sched_weekly.day_mask));
+            g_state.sensor.sched_weekly.day_mask[today] = day_masks[0];
+            Serial.printf("[MQTT] Schedule: single mask %s applied to %s (day %u)\n",
+                          start, schedule_get_day_name(today), today);
+        }
+    } else {
+        // Multiple days provided (full week or partial)
+        for (uint8_t d = 0; d < day_count; d++) {
+            g_state.sensor.sched_weekly.day_mask[d] = day_masks[d];
+        }
+        // Zero out remaining days if any
+        for (uint8_t d = day_count; d < SCHEDULE_DAYS; d++) {
+            g_state.sensor.sched_weekly.day_mask[d] = 0;
+        }
+        Serial.printf("[MQTT] Schedule: full weekly schedule received (%u days)\n", day_count);
+    }
+
+    g_state.sensor.sched_weekly.valid = true;
     g_state.sensor.sched_shutdown_active = false;
     g_state.sensor.sched_shutdown_timer_ms = 0;
+    g_state.sensor.sched_last_triggered_min = 0;
+    g_state.sensor.sched_retry_pending = false;
+    g_state.sensor.sched_retry_check_ms = 0;
+    g_state.sensor.sched_retry_session = 0;
+
+    // Cache today's active sessions
+    uint8_t today_bitmask = 0;
+    uint8_t today_idx = schedule_get_day_of_week();
+    if (today_idx < SCHEDULE_DAYS) {
+        today_bitmask = g_state.sensor.sched_weekly.day_mask[today_idx];
+    }
+    g_state.sensor.sched_today_sessions_bitmask = today_bitmask;
+    g_state.sensor.sched_active_session_count = 0;
+    memset(g_state.sensor.sched_active_sessions, 0, sizeof(g_state.sensor.sched_active_sessions));
+    for (uint8_t s = 0; s < SCHEDULE_SESSION_COUNT; s++) {
+        bool active = (today_bitmask & (1 << s)) != 0;
+        g_state.sensor.sched_active_sessions[s] = active;
+        if (active) g_state.sensor.sched_active_session_count++;
+    }
+
     g_state.ui_needs_update = true;
     data_unlock(g_state);
     data_save_device_config(g_state);
 
-    Serial.printf("[MQTT] Daily schedule saved date=%lu slots=%u\n",
-                  (unsigned long)date_value, parsed_count);
+    // Print summary
+    uint8_t today_display = schedule_get_day_of_week();
+    if (today_display < SCHEDULE_DAYS) {
+        Serial.printf("[MQTT] Schedule active today (%s): ", schedule_get_day_name(today_display));
+        for (uint8_t s = 0; s < SCHEDULE_SESSION_COUNT; s++) {
+            if (today_bitmask & (1 << s)) {
+                uint8_t sh, sm, eh, em;
+                schedule_get_session_time(s, sh, sm, eh, em);
+                Serial.printf("S%u(%02u:%02u-%02u:%02u) ", s+1, sh, sm, eh, em);
+            }
+        }
+        Serial.println();
+    }
+
     return true;
 }
 
@@ -630,6 +728,9 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
                 Serial.println("[MQTT] LED command ignored by occupancy safety");
                 return;
             }
+            data_lock(g_state);
+            g_state.sensor.app_controlled_light = scalar_on;
+            data_unlock(g_state);
             rs485_request_light_command(scalar_on);
             Serial.println("[MQTT] LED scalar command queued; waiting for relay readback");
             return;
@@ -669,6 +770,9 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
             changed = false;
             Serial.println("[MQTT] LED JSON command ignored by occupancy safety");
         }
+        if (changed) {
+            g_state.sensor.app_controlled_light = desired_on;
+        }
         data_unlock(g_state);
         if (changed) {
             rs485_request_light_command(desired_on);
@@ -692,6 +796,7 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
             g_state.sensor.temp_target = desired_target;
             g_state.sensor.ac_fan_speed = desired_fan;
             g_state.sensor.ac_swing_mode = desired_swing;
+            g_state.sensor.app_controlled_ac = desired_power;
             g_state.ui_needs_update = true;
             data_unlock(g_state);
             rs485_request_ac_command(desired_power, desired_target, 0, desired_fan, desired_swing);
@@ -736,6 +841,7 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
         desired_target = g_state.sensor.temp_target;
         desired_fan = g_state.sensor.ac_fan_speed;
         desired_swing = g_state.sensor.ac_swing_mode;
+        g_state.sensor.app_controlled_ac = desired_power;
         g_state.ui_needs_update = true;
         data_unlock(g_state);
         rs485_request_ac_command(desired_power, desired_target, 0, desired_fan, desired_swing);
@@ -749,6 +855,7 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
         if (mqtt_parse_bool_payload(payload, length, scalar_on)) {
             data_lock(g_state);
             g_state.sensor.projector_on = scalar_on;
+            g_state.sensor.app_controlled_projector = scalar_on;
             g_state.ui_needs_update = true;
             data_unlock(g_state);
             rs485_request_projector_command(scalar_on);
@@ -776,6 +883,7 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
             }
         }
         desired_power = g_state.sensor.projector_on;
+        g_state.sensor.app_controlled_projector = desired_power;
         g_state.ui_needs_update = true;
         data_unlock(g_state);
         rs485_request_projector_command(desired_power);
@@ -793,7 +901,12 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
         char* end = start + strlen(start);
         while (end > start && isspace((unsigned char)end[-1])) *--end = '\0';
 
-        if (strcmp(start, "PRE_CLASS_ON") == 0) {
+        // Try new format first (bitmask)
+        if (mqtt_parse_weekly_schedule(start)) {
+            // New format applied successfully
+        }
+        // Fallback to old format commands
+        else if (strcmp(start, "PRE_CLASS_ON") == 0) {
             Serial.println("[MQTT] Schedule: PRE_CLASS_ON command received");
             data_lock(g_state);
             g_state.sensor.ac_on = true;
@@ -814,8 +927,8 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
             g_state.ui_needs_update = true;
             data_unlock(g_state);
             mqtt_publish_state();
-        } else if (!mqtt_apply_daily_schedule(start)) {
-            Serial.printf("[MQTT] Invalid daily schedule ignored: %s\n", start);
+        } else {
+            Serial.printf("[MQTT] Invalid schedule ignored: %s\n", start);
         }
         return;
     }
@@ -848,6 +961,7 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
                 g_state.sensor.projector_on = controls["projector"]["power"].as<bool>();
                 projector_changed = true;
                 projector_power = g_state.sensor.projector_on;
+                g_state.sensor.app_controlled_projector = projector_power;
             }
             if (!controls["ac"]["power"].isNull()) {
                 bool new_ac_power = controls["ac"]["power"].as<bool>();
@@ -856,6 +970,7 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
                 } else {
                     g_state.sensor.ac_on = new_ac_power;
                     ac_changed = true;
+                    g_state.sensor.app_controlled_ac = new_ac_power;
                 }
             }
             if (!controls["ac"]["target_c"].isNull()) {
@@ -883,6 +998,7 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
                         } else {
                             light_changed = true;
                             light_power = new_light_power;
+                            g_state.sensor.app_controlled_light = new_light_power;
                         }
                     }
                 }
@@ -899,19 +1015,22 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
         int   co2  = doc["co2"].isNull()          ? -1      : doc["co2"].as<int>();
 
         data_lock(g_state);
-        if (temp > -50.0f) {
-            g_state.sensor.temp[0] = temp;
-            g_state.sensor.sensor_error[0] = false;
-        } else {
-            g_state.sensor.temp[0] = -100.0f;
+        // NOTE: Hanya update lux & co2 dari MQTT, bukan temperature!
+        // Temperature hanya berasal dari RS485 slave polling.
+        // Jangan override g_state.sensor.temp[] atau last_data_ts dari sini,
+        // karena itu akan memblokir timeout detection saat slave mati.
+        if (lux >= 0.0f) {
+            g_state.sensor.lux = lux;
         }
-        g_state.sensor.lux  = lux;
-        g_state.sensor.co2  = co2;
-        g_state.last_data_ts     = millis();
+        if (co2 >= 0) {
+            g_state.sensor.co2 = co2;
+        }
+        // g_state.sensor.temp[0] TIDAK di-update dari MQTT - hanya dari RS485!
+        // g_state.last_data_ts TIDAK di-update dari MQTT - hanya dari RS485!
         g_state.ui_needs_update  = true;
         data_unlock(g_state);
 
-        Serial.printf("[MQTT] Data: T:%.1f L:%.0f C:%d\n", temp, lux, co2);
+        Serial.printf("[MQTT] Data: T:%.1f(ignored) L:%.0f C:%d\n", temp, lux, co2);
     }
 }
 
@@ -1030,6 +1149,7 @@ void mqtt_loop() {
         static uint32_t last_temp_burst_publish = 0;
         static uint32_t temp_burst_until = 0;
         static bool snapshot_ready = false;
+        static uint32_t last_data_collect_publish = 0;
         static bool last_human_valid = false;
         static bool last_human = false;
         static bool last_led = false;
@@ -1047,6 +1167,7 @@ void mqtt_loop() {
             float target;
             bool projector;
             bool light_confirmation_pending;
+            bool data_collect = false;
             data_lock(g_state);
             human_valid = g_state.rs485.dashboard.human_presence_valid;
             human = g_state.sensor.human_presence;
@@ -1056,6 +1177,7 @@ void mqtt_loop() {
             projector = g_state.sensor.projector_on;
             light_confirmation_pending = g_state.rs485.light_state_publish_pending;
             g_state.rs485.light_state_publish_pending = false;
+            data_collect = g_state.sensor.data_collect_mode;
             data_unlock(g_state);
 
             uint16_t flags = 0;
@@ -1063,6 +1185,7 @@ void mqtt_loop() {
                 snapshot_ready = true;
                 flags = MQTT_PUBLISH_ALL;
                 last_heartbeat = now;
+                last_data_collect_publish = now;
             } else {
                 if (human_valid != last_human_valid || human != last_human) flags |= MQTT_PUBLISH_HUMAN;
                 if (led != last_led) {
@@ -1087,6 +1210,15 @@ void mqtt_loop() {
             last_ac = ac;
             last_target = target;
             last_projector = projector;
+
+            if (data_collect) {
+                if (last_data_collect_publish == 0 || now - last_data_collect_publish >= 10000) {
+                    flags |= MQTT_PUBLISH_ALL;
+                    last_data_collect_publish = now;
+                }
+            } else {
+                last_data_collect_publish = 0;
+            }
 
             if ((int32_t)(temp_burst_until - now) > 0 &&
                 (last_temp_burst_publish == 0 || now - last_temp_burst_publish >= MQTT_TEMP_BURST_INTERVAL_MS)) {

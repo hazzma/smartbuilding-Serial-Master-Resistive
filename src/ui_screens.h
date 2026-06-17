@@ -19,7 +19,8 @@ enum ScreenState {
     SCREEN_MAPPING_SOURCE = 12,
     SCREEN_DEVICE_INFO = 13,
     SCREEN_MQTT_SETUP = 14,
-    SCREEN_TOUCH_TEST = 15
+    SCREEN_TOUCH_TEST = 15,
+    SCREEN_CLOCK_SETUP = 16
 };
 
 struct UIEventCallbacks {

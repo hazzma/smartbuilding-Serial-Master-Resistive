@@ -13,17 +13,23 @@ static uint32_t last_diag_ts = 0;
 static uint32_t last_raw_log_ts = 0;
 
 static int32_t touch_correct_screen_x(int32_t x) {
-    if (x <= 223) {
-        return 35 + (x * 205) / 223;
+    if (x <= 29) {
+        return (x * 35) / 29;
     }
-    return 240 + ((x - 223) * 205) / 225;
+    if (x <= 251) {
+        return 35 + ((x - 29) * 205) / 222;
+    }
+    return 240 + ((x - 251) * 205) / 229;
 }
 
 static int32_t touch_correct_screen_y(int32_t y) {
-    if (y <= 184) {
-        return 70 + ((y - 62) * 110) / 122;
+    if (y <= 70) {
+        return y;
     }
-    return 180 + ((y - 184) * 110) / 116;
+    if (y <= 182) {
+        return 70 + ((y - 70) * 110) / 112;
+    }
+    return 180 + ((y - 182) * 110) / 118;
 }
 
 static uint16_t touch_spi_read_adc(uint8_t command) {

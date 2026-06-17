@@ -9,5 +9,6 @@
 
 void time_manager_init();
 void time_manager_update();
+void time_manager_set_manual(int year, int month, int day, int hour, int minute);
 
 #endif

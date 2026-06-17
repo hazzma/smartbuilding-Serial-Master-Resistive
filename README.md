@@ -16,6 +16,18 @@ The firmware targets an ESP32-S3 N16R8 board with a 3.5 inch ILI9488 serial SPI 
 - Uses Firmware V2.1 slave rules: the master assigns a Device Profile while the slave stays policy-blind.
 - Maps raw slave data into logical dashboard slots such as temperature, CO2, presence, Lux, LED, AC, and projector.
 
+## RS485 Polling Performance Warning & Rule
+
+> [!WARNING]
+> On the Modbus RTU RS485 bus, the master polls registered slaves in a round-robin sequence (one register read/write transaction per `RS485_POLL_INTERVAL_MS` tick).
+>
+> If you have **N** active slaves connected, the update frequency for any individual slave's data is `N × RS485_POLL_INTERVAL_MS` milliseconds.
+>
+> **Rule**: Keep `RS485_POLL_INTERVAL_MS` low (e.g., `300ms`). 
+> - If set to `1000ms` with 3 active slaves, each sensor only updates every 3 seconds, leading to a laggy UI and delayed MQTT messages.
+> - With `300ms`, a full cycle of 3 slaves finishes in `900ms` (< 1 second), keeping UI and MQTT data snappy.
+> - Modbus transaction timeout is `100ms` with 1 retry (max transaction `200ms`), making `300ms` a safe, non-blocking polling interval.
+
 ## Firmware V2 at a Glance
 
 What changed: Firmware V2 moves away from one large MQTT state topic and multi-main-sensor slave assumptions.
@@ -169,9 +181,8 @@ own Lux zone and use a persistent `INCONCLUSIVE` state before raising a warning.
 - Records the next lamp-verification design without enabling it yet: window/weather changes and one-zone-only lighting must not become false lamp warnings.
 - Plans logical separation between room Lux, projector-verification Lux, and Lux outlier detection while keeping the existing 5-7 day active-load anomaly.
 - Keeps master authority over lamp commands while a room is confirmed occupied.
-- Implements the local daily schedule engine: validates and stores `YYYYMMDD;HHMM-HHMM;...`, overwrites the previous schedule, triggers pre-class actions 20 minutes early, starts smart shutdown at class end, and catches up after reboot.
-- Every valid daily schedule payload immediately replaces the previous stored
-  schedule, even if one or more old schedule slots have not happened yet.
+- Implements the local weekly session-based schedule engine: validates and stores `S1S2S3S4S5S6;...` (representing active sessions S1 to S6 for Monday to Sunday), overwrites the previous schedule, triggers pre-class actions 20 minutes before class sessions start, starts smart shutdown at class end, and catches up after reboot.
+- Every valid weekly/daily schedule payload immediately replaces the previous stored schedule, re-caches today's active sessions, and resets trigger states.
 - Adds conservative AC cooling-performance monitoring through Alert Bit 6
   without requiring room temperature to reach the AC setpoint.
 - Full implementation status and remaining Lux work: `docs/V2.8_Planning.md`.
@@ -180,7 +191,7 @@ own Lux zone and use a persistent `INCONCLUSIVE` state before raising a warning.
 
 - **Projector Adaptive Verification Target**: Refines the V2.7 projector check from a fixed Lux delta into an adaptive per-channel baseline algorithm. While the projector is OFF and one or more Lux channels are valid, the master learns the room ambient baseline per channel. When Projector ON is requested, it compares each post-warmup Lux channel against its own baseline using a hybrid threshold such as `max(20 lx, min(80 lx, baseline * 0.20))` plus a ratio guard. If no BH1750/Lux channel is installed or valid, the command still behaves as normal IR ON/OFF and is marked `NO LUX`, not failed.
 - **Projector Warning Semantics**: If at least one Lux channel proves the projector turned on but another expected Lux channel is missing or unchanged, the projector stays ON and the UI shows `CHK LUX`. If no channel proves ON after one retry, the projector still stays ON but shows `CHK PROJ` and raises Alert Bit 5. The master no longer auto-publishes OFF just because one-way IR verification failed.
-- **Daily Schedule Payload Target**: `HD01/control/schedule` will support a daily overwrite payload from the server, for example `20260609;0800-0930;1015-1200;1330-1500`. Every valid daily payload replaces the previous stored schedule and resets that day's trigger flags, so the server can send one schedule around midnight and the master can run it locally if MQTT/server availability drops later.
+- **Schedule Payload Target**: `HD01/control/schedule` will support a weekly or today-only schedule payload from the server using 6-digit binary bitmasks (`S1S2S3S4S5S6` representing sessions S1 to S6). For example: `010011` (today has sessions S2, S5, S6) or `010011;111000;000000;000000;000000;000000;000000` (Monday has S2, S5, S6; Tuesday has S1, S2, S3; rest none). Every valid weekly/daily payload replaces the previous stored schedule, re-caches today's active sessions, and resets trigger states. This allows the server to send the schedule around midnight, and the master can run it locally even if MQTT connection drops later.
 - **Scheduler Safety Clarification**: Occupancy-based shutdown should only trust `human_presence` when the presence value is valid. If the shutdown timer expires while the room is still occupied, the master should recheck on a slow interval such as 5 minutes instead of continuously evaluating the expired timer.
 - **Anomaly Alert Baseline Fix**: Alert Bit 7 (128) is defined as after-hours empty-room active-load anomaly. The alert should require valid time, valid occupancy, enough historical days, and a meaningful baseline. Recommended trigger: `active_load_minutes > max(avg_7d * 1.5, avg_7d + 60)` during 22:00-06:00 when the room is confirmed empty.
 
@@ -422,14 +433,21 @@ Firmware V2 slave configuration effect:
 - `IR_COMBO_NODE` may expose AC 1, AC 2, and Projector on one IR slave.
 - Slave firmware remains RAM-only and policy-blind.
 
-## Build
+## Build & Environment Setup
 
-Install PlatformIO, then run:
+### ⚙️ PlatformIO Environment Locking
 
+Untuk memastikan stabilitas sistem WiFi scan dan menghindari bug asinkronus/disconnect pada Arduino Core terbaru (3.0.x+), versi platform **espressif32** dikunci pada **`6.5.0`** (menggunakan Arduino Core v2.0.14 stabil). Jangan mengubah atau menghapus penguncian versi ini di `platformio.ini` tanpa pengujian menyeluruh pada fungsionalitas asinkronus WiFi & MQTT socket.
+
+Konfigurasi lingkungan pada `platformio.ini`:
+```ini
+platform = espressif32@6.5.0
+board = esp32-s3-devkitc-1
+framework = arduino
+```
+
+Install PlatformIO, kemudian jalankan perintah kompilasi:
 ```bash
-# EDIT_TARGET: README.md - Build
-# EDIT_PURPOSE: Show PlatformIO build command
-# EDIT_REASON: Developers need a quick command to compile firmware locally
 pio run
 ```
 

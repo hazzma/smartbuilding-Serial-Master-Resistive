@@ -2,6 +2,7 @@
 #include "mapping_manager.h"
 #include <Preferences.h>
 #include <string.h>
+#include <time.h>
 
 #if __has_include("mqtt_secrets.h")
 #include "mqtt_secrets.h"
@@ -13,6 +14,69 @@ BuildingState g_state;
 static const char* RS485_PREF_NS = "rs485cfg";
 static const char* DEVICE_PREF_NS = "device_cfg";
 static const uint8_t RS485_PREF_ASSIGN_SCHEMA = 2;
+
+// ────────────────────────────────────────────────────────────────────────────
+// BINUS Session Time Definitions (S1..S6)
+// Each session = 100 minutes, gap = 20 minutes between sessions
+// ────────────────────────────────────────────────────────────────────────────
+static const SessionConfig SESSION_TIMES[SCHEDULE_SESSION_COUNT] = {
+    { 7, 20,  9,  0 },  // S1: 07:20 - 09:00
+    { 9, 20, 11,  0 },  // S2: 09:20 - 11:00
+    { 11, 20, 13, 0 },  // S3: 11:20 - 13:00
+    { 13, 20, 15, 0 },  // S4: 13:20 - 15:00
+    { 15, 20, 17, 0 },  // S5: 15:20 - 17:00
+    { 17, 20, 19, 0 }   // S6: 17:20 - 19:00
+};
+
+void schedule_get_session_time(uint8_t session_index, uint8_t& start_hour, uint8_t& start_min,
+                                uint8_t& end_hour, uint8_t& end_min) {
+    if (session_index >= SCHEDULE_SESSION_COUNT) session_index = 0;
+    start_hour = SESSION_TIMES[session_index].start_hour;
+    start_min  = SESSION_TIMES[session_index].start_min;
+    end_hour   = SESSION_TIMES[session_index].end_hour;
+    end_min    = SESSION_TIMES[session_index].end_min;
+}
+
+uint16_t schedule_get_session_start_min(uint8_t session_index) {
+    if (session_index >= SCHEDULE_SESSION_COUNT) session_index = 0;
+    return (uint16_t)SESSION_TIMES[session_index].start_hour * 60U + SESSION_TIMES[session_index].start_min;
+}
+
+uint16_t schedule_get_session_end_min(uint8_t session_index) {
+    if (session_index >= SCHEDULE_SESSION_COUNT) session_index = 0;
+    return (uint16_t)SESSION_TIMES[session_index].end_hour * 60U + SESSION_TIMES[session_index].end_min;
+}
+
+uint16_t schedule_get_pre_start_min(uint8_t session_index) {
+    uint16_t start = schedule_get_session_start_min(session_index);
+    return start >= 20 ? start - 20 : 0;
+}
+
+uint8_t schedule_get_day_of_week() {
+    struct tm timeinfo;
+    if (!getLocalTime(&timeinfo, 5)) return 255;
+    // tm_wday: 0=Sunday..6=Saturday, we need 0=Monday..6=Sunday
+    int wday = timeinfo.tm_wday; // 0=Sun
+    if (wday == 0) return 6;     // Sunday -> index 6
+    return wday - 1;             // Mon=0, Tue=1, ..., Sat=5
+}
+
+bool schedule_is_session_active(const WeeklyScheduleData& wsd, uint8_t day_index, uint8_t session_index) {
+    if (!wsd.valid || day_index >= SCHEDULE_DAYS || session_index >= SCHEDULE_SESSION_COUNT) return false;
+    return (wsd.day_mask[day_index] & (1 << session_index)) != 0;
+}
+
+uint8_t schedule_get_active_sessions_today(const WeeklyScheduleData& wsd) {
+    uint8_t day = schedule_get_day_of_week();
+    if (day >= SCHEDULE_DAYS || !wsd.valid) return 0;
+    return wsd.day_mask[day];
+}
+
+const char* schedule_get_day_name(uint8_t day_index) {
+    static const char* day_names[] = {"Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"};
+    if (day_index >= SCHEDULE_DAYS) return "Unknown";
+    return day_names[day_index];
+}
 
 const char* device_profile_name(DeviceProfile profile) {
     switch (profile) {
@@ -115,6 +179,15 @@ void data_load_dummy(BuildingState& state) {
 
         state.sensor.sched_shutdown_active = false;
         state.sensor.sched_shutdown_timer_ms = 0;
+        state.sensor.sched_weekly.valid = false;
+        memset(state.sensor.sched_weekly.day_mask, 0, sizeof(state.sensor.sched_weekly.day_mask));
+        memset(state.sensor.sched_active_sessions, 0, sizeof(state.sensor.sched_active_sessions));
+        state.sensor.sched_active_session_count = 0;
+        state.sensor.sched_today_sessions_bitmask = 0;
+        state.sensor.sched_last_triggered_min = 0;
+        state.sensor.sched_retry_pending = false;
+        state.sensor.sched_retry_check_ms = 0;
+        state.sensor.sched_retry_session = 0;
         state.sensor.schedule_date_yyyymmdd = 0;
         state.sensor.schedule_slot_count = 0;
         memset(state.sensor.schedule_slots, 0, sizeof(state.sensor.schedule_slots));
@@ -125,6 +198,10 @@ void data_load_dummy(BuildingState& state) {
         memset(state.sensor.light_history_min, 0, sizeof(state.sensor.light_history_min));
         state.sensor.light_day_count = 0;
         state.sensor.light_anomaly_alert = false;
+        state.sensor.data_collect_mode = false;
+        state.sensor.app_controlled_ac = false;
+        state.sensor.app_controlled_light = false;
+        state.sensor.app_controlled_projector = false;
 
         state.net.wifi_connected = true;
         state.net.lan_connected  = false;
@@ -171,6 +248,7 @@ void data_load_dummy(BuildingState& state) {
         strcpy(state.net.connected_wifi_ssid, "-");
         state.net.saved_wifi_ssid[0] = '\0';
         state.net.saved_wifi_pass[0] = '\0';
+        state.net.use_manual_time = false;
 
         state.net.wifi_scan_requested = false;
         state.net.wifi_scan_active = false;
@@ -291,6 +369,7 @@ void data_load_device_config(BuildingState& state) {
     state.net.mqtt_use_tls = prefs.getBool("mqtt_tls", state.net.mqtt_use_tls);
     prefs.getString("mqtt_user", state.net.mqtt_user, sizeof(state.net.mqtt_user));
     prefs.getString("mqtt_pass", state.net.mqtt_pass, sizeof(state.net.mqtt_pass));
+    state.net.use_manual_time = prefs.getBool("man_time", false);
     if (state.net.device_name[0] == '\0') {
         strncpy(state.net.device_name, "Meeting Room Master", sizeof(state.net.device_name) - 1);
         state.net.device_name[sizeof(state.net.device_name) - 1] = '\0';
@@ -311,11 +390,28 @@ void data_load_device_config(BuildingState& state) {
     state.sensor.light_accum_sec_today = prefs.getUInt("l_acc_sec", 0);
     state.sensor.active_load_accum_sec_today = prefs.getUInt("al_acc_sec", state.sensor.light_accum_sec_today);
     state.sensor.light_anomaly_alert = prefs.getBool("l_anom_alrt", false);
+    state.sensor.data_collect_mode = prefs.getBool("data_coll", false);
     for (int i = 0; i < 7; i++) {
         char key[16];
         snprintf(key, sizeof(key), "l_hist_%d", i);
         state.sensor.light_history_min[i] = prefs.getUShort(key, 0);
     }
+    // Load NEW weekly schedule format
+    state.sensor.sched_weekly.valid = prefs.getBool("sw_valid", false);
+    for (uint8_t d = 0; d < SCHEDULE_DAYS; d++) {
+        char key[16];
+        snprintf(key, sizeof(key), "sw_day%u", d);
+        state.sensor.sched_weekly.day_mask[d] = prefs.getUChar(key, 0);
+    }
+    memset(state.sensor.sched_active_sessions, 0, sizeof(state.sensor.sched_active_sessions));
+    state.sensor.sched_active_session_count = 0;
+    state.sensor.sched_today_sessions_bitmask = 0;
+    state.sensor.sched_last_triggered_min = 0;
+    state.sensor.sched_retry_pending = false;
+    state.sensor.sched_retry_check_ms = 0;
+    state.sensor.sched_retry_session = 0;
+
+    // Legacy load (for backward compat only)
     state.sensor.schedule_date_yyyymmdd = prefs.getUInt("sched_date", 0);
     state.sensor.schedule_slot_count = prefs.getUChar("sched_count", 0);
     if (state.sensor.schedule_slot_count > DAILY_SCHEDULE_MAX_SLOTS) {
@@ -349,16 +445,27 @@ void data_save_device_config(BuildingState& state) {
     prefs.putBool("mqtt_tls", state.net.mqtt_use_tls);
     prefs.putString("mqtt_user", state.net.mqtt_user);
     prefs.putString("mqtt_pass", state.net.mqtt_pass);
+    prefs.putBool("man_time", state.net.use_manual_time);
 
     prefs.putUInt("l_day_cnt", state.sensor.light_day_count);
     prefs.putUInt("l_acc_sec", state.sensor.light_accum_sec_today);
     prefs.putUInt("al_acc_sec", state.sensor.active_load_accum_sec_today);
     prefs.putBool("l_anom_alrt", state.sensor.light_anomaly_alert);
+    prefs.putBool("data_coll", state.sensor.data_collect_mode);
     for (int i = 0; i < 7; i++) {
         char key[16];
         snprintf(key, sizeof(key), "l_hist_%d", i);
         prefs.putUShort(key, state.sensor.light_history_min[i]);
     }
+    // Save NEW weekly schedule
+    prefs.putBool("sw_valid", state.sensor.sched_weekly.valid);
+    for (uint8_t d = 0; d < SCHEDULE_DAYS; d++) {
+        char key[16];
+        snprintf(key, sizeof(key), "sw_day%u", d);
+        prefs.putUChar(key, state.sensor.sched_weekly.day_mask[d]);
+    }
+
+    // Legacy save (backward compat)
     prefs.putUInt("sched_date", state.sensor.schedule_date_yyyymmdd);
     prefs.putUChar("sched_count", state.sensor.schedule_slot_count);
     for (uint8_t i = 0; i < DAILY_SCHEDULE_MAX_SLOTS; i++) {

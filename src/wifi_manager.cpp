@@ -1,5 +1,6 @@
 #include "wifi_manager.h"
 #include "data.h"
+#include "mqtt_manager.h"
 
 static Preferences prefs;
 static bool wifi_power_policy_on = true;
@@ -16,6 +17,7 @@ static uint32_t wifi_scan_prepare_start_ms = 0;
 
 void wifi_manager_init() {
     prefs.begin("wifi_cfg", false);
+    WiFi.persistent(false);
     WiFi.setSleep(false);
 
     String ssid = prefs.getString("ssid", "");
@@ -190,9 +192,13 @@ static void wifi_scan_prepare_start() {
     // Save whether we need to restore connection later
     wifi_scan_restore_connect = wifi_power_policy_on && (prefs.getString("ssid", "").length() > 0);
 
-    Serial.println("[SCAN] Disconnecting and disabling auto-reconnect for scan");
+    Serial.println("[SCAN] Disconnecting MQTT and WiFi for scan");
+    mqtt_request_reconnect();
     WiFi.setAutoReconnect(false);
-    WiFi.disconnect(false, false);
+    WiFi.disconnect(true, false); // Turn off WiFi completely to force drop
+    delay(100);                   // Give radio time to power down
+    WiFi.mode(WIFI_STA);          // Bring it back up in Station mode
+    WiFi.setAutoReconnect(false); // Prevent automatic reconnect triggered by mode change
 
     WiFi.scanDelete();
     wifi_scan_start_ready_ms = millis() + WIFI_SCAN_RADIO_WARMUP_MS;

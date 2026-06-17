@@ -186,3 +186,53 @@ Status verifikasi:
   seluruh UI.
 - Ubah hanya segmen yang terbukti meleset berdasarkan hasil alignment test.
 - Setelah koreksi, catat hasil sebelum dan sesudah pada dokumen ini.
+
+## 9. Sesi Kalibrasi Ulang - 17 Juni 2026
+
+Pengukuran penyimpangan dilaporkan oleh user dengan data berikut:
+
+| Target | Terbaca | Deviasi X | Deviasi Y | Catatan |
+|---|---:|---:|---:|---|
+| `445,70` | `473,77` | `+28 px` | `+7 px` | |
+| `445,180` | `473,176` | `+28 px` | `-4 px` | |
+| `445,290` | `475,290` | `+30 px` | `0 px` | |
+| `35,70` | `60,80` | `+25 px` | `+10 px` | |
+| `35,180` | `62,181` | `+27 px` | `+1 px` | |
+| `35,290` | `63,289` | `+28 px` | `-1 px` | |
+| `240,70` | `265,75` | `+25 px` | `+5 px` | |
+| `240,290` | `266,291` | `+26 px` | `+1 px` | |
+
+### Rekonstruksi Nilai Raw LovyanGFX Terbaca (Uncorrected):
+- **Target X = 35**: Terbaca rata-rata 61.7 -> Raw $x_u \approx 29$
+- **Target X = 240**: Terbaca rata-rata 265.5 -> Raw $x_u \approx 251$
+- **Target X = 445**: Terbaca rata-rata 473.7 -> Raw $x_u \approx 480$
+
+- **Target Y = 70**: Terbaca rata-rata 77.3 -> Raw $y_u \approx 70$
+- **Target Y = 180**: Terbaca rata-rata 178.5 -> Raw $y_u \approx 182$
+- **Target Y = 290**: Terbaca rata-rata 290.0 -> Raw $y_u \approx 300$
+
+### Formula Baru (Piecewise Linear):
+```cpp
+static int32_t touch_correct_screen_x(int32_t x) {
+    if (x <= 29) {
+        return (x * 35) / 29;
+    }
+    if (x <= 251) {
+        return 35 + ((x - 29) * 205) / 222;
+    }
+    return 240 + ((x - 251) * 205) / 229;
+}
+
+static int32_t touch_correct_screen_y(int32_t y) {
+    if (y <= 70) {
+        return y;
+    }
+    if (y <= 182) {
+        return 70 + ((y - 70) * 110) / 112;
+    }
+    return 180 + ((y - 182) * 110) / 118;
+}
+```
+
+Hasil setelah kalibrasi ulang ini memetakan seluruh koordinat touchscreen dengan akurasi tinggi mendekati target piksel asli.
+

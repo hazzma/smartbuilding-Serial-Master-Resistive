@@ -38,12 +38,13 @@ Sistem dirancang modular, dengan pemisahan tanggung jawab yang ketat antar modul
 
 Firmware V2 updates the system contract around three simple ideas: saved-slave reconnect on startup, per-sensor MQTT topics, and master-owned device profile assignment.
 
-V2.8 implementation note: event-driven MQTT publish timing and the local daily
+V2.8 implementation note: event-driven MQTT publish timing and the local weekly session-based
 schedule engine are documented in `docs/V2.8_Planning.md`. `PRE_CLASS_ON`,
-`CLASS_ENDED`, daily schedule parsing, NVS persistence, overwrite, catch-up, and
+`CLASS_ENDED`, weekly bitmask schedule parsing, NVS persistence, overwrite, catch-up, and
 local execution work. Room-vs-projector Lux classification and Lux outlier
 detection remain planned because they require an explicit channel assignment
 model.
+
 
 What changed:
 - Startup SHALL check saved slave configuration first. If saved slave data exists, the master SHALL try to reconnect those slaves. If no saved slave data exists, the master SHALL do nothing until the user starts discovery.
@@ -98,9 +99,10 @@ What changed:
   an additional delayed Lux publish.
 - Schedule input SHALL be server-owned and UI-less on the master. The master
   SHALL always listen to `HD01/control/schedule`.
-- `HD01/control/schedule` SHALL support a daily overwrite payload such as
-  `YYYYMMDD;0800-0930;1015-1200`. A valid payload SHALL replace the previous
-  stored daily schedule and reset slot trigger flags.
+- `HD01/control/schedule` SHALL support a weekly schedule payload or today-only schedule payload using a 6-digit binary bitmask (`S1S2S3S4S5S6` representing sessions S1 to S6).
+  - Single day format: `S1S2S3S4S5S6` (e.g. `010011` to enable sessions S2, S5, and S6 for today).
+  - Weekly format: `S1S2S3S4S5S6;S1S2S3S4S5S6;S1S2S3S4S5S6;S1S2S3S4S5S6;S1S2S3S4S5S6;S1S2S3S4S5S6;S1S2S3S4S5S6` (separated by semicolons for Monday to Sunday).
+  A valid payload SHALL replace the previous stored schedule, re-cache active sessions for today, and reset trigger states.
 - The existing `PRE_CLASS_ON` and `CLASS_ENDED` schedule commands SHALL remain
   supported as fallback/manual event commands.
 - Occupancy safety rules SHALL only trust `human_presence` when the presence
@@ -148,6 +150,10 @@ Implementation effect:
 Engineering rule:
 
 > Jika WiFi, LAN, MQTT, atau scan WiFi sedang gagal/lambat, UI harus tetap bisa render dan menerima touch.
+
+### WARNING & RULE: RS485 Polling Performance
+- **WARNING**: Pada Modbus RTU RS485, master melakukan polling ke slave satu per satu (round-robin) setiap interval `RS485_POLL_INTERVAL_MS`. Jika terdapat N slave aktif, waktu update data untuk masing-masing slave adalah `N × RS485_POLL_INTERVAL_MS` milidetik.
+- **RULE**: Nilai `RS485_POLL_INTERVAL_MS` harus dijaga tetap rendah (contoh: `300ms`). Jika diset terlalu tinggi (misal `1000ms`), dengan 3 slave terhubung, data sensor hanya akan terupdate setiap 3 detik di UI dan MQTT. Dengan interval `300ms`, total cycle untuk 3 slave selesai dalam `900ms` (< 1 detik), menjaga responsivitas data. Batas timeout Modbus diset `100ms` dengan 1x retry (total transaksi maks `200ms`), sehingga interval `300ms` aman dan stabil.
 
 ---
 
@@ -956,6 +962,9 @@ Startup SHALL check saved slave configuration before discovery. If saved slave d
 **RS485-010**
 Firmware V2.1 slave assignment SHALL use master-owned Device Profiles. The master SHALL enforce profile policy and write the matching v2.1 capability registers; the slave SHALL remain policy-blind.
 
+**RS485-011**  
+RS485 polling interval SHALL be 1000 ms (1 second) per step. The polling mechanism SHALL poll configured/saved slaves using a round-robin strategy where one poll step query targets one registry block of one slave device. Therefore, a complete cycle of all $N$ configured slaves takes $N$ seconds (e.g., if there are 4 active slaves, each slave is queried once every 4 seconds).
+
 ### 7.5 Concurrency
 
 **CONC-001**  
@@ -1322,7 +1331,7 @@ runtime template `<class_name>/control/<command_type>`.
 | `HD01/control/led` | Integer command | Forward LED command to target slave, wait for confirmation, publish LED integer state. |
 | `HD01/control/ac` | `PPTTFFSS` command | Forward AC command to target slave, wait for confirmation, publish latest AC state. |
 | `HD01/control/projector` | Integer command | Forward projector command to target slave, wait for confirmation, publish latest projector integer state. |
-| `HD01/control/schedule` | Event or daily schedule command | Accepts `PRE_CLASS_ON`, `CLASS_ENDED`, or daily overwrite payload `YYYYMMDD;HHMM-HHMM;...`. |
+| `HD01/control/schedule` | Event or weekly/daily bitmask schedule command | Accepts `PRE_CLASS_ON`, `CLASS_ENDED`, a today-only bitmask `S1S2S3S4S5S6`, or a full weekly bitmask schedule `S1S2S3S4S5S6;S1S2S3S4S5S6;...` (separated by semicolons for Mon-Sun). |
 
 What changed: command handling is topic-based and confirmation-based.
 

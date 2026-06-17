@@ -4,8 +4,12 @@
 #include "rs485_manager.h"
 #include "mapping_manager.h"
 #include "mqtt_manager.h"
+#include "time_manager.h"
 
 #include <string.h>
+
+void render_clock_setup(BuildingState& state);
+void handle_clock_setup_touch(BuildingState& state, int tx, int ty);
 
 static ScreenState current_screen = SCREEN_DASHBOARD;
 static UIEventCallbacks ui_callbacks;
@@ -30,6 +34,13 @@ static bool settings_dragging = false;
 static bool settings_moved = false;
 static int  settings_drag_start_x = 0;
 static int  settings_drag_start_y = 0;
+
+static bool clock_setup_manual_mode = false;
+static int  manual_clock_year = 2026;
+static int  manual_clock_month = 6;
+static int  manual_clock_day = 17;
+static int  manual_clock_hour = 19;
+static int  manual_clock_minute = 47;
 
 static float wifi_scan_scroll_y = 0.0f;
 static float wifi_scan_scroll_target = 0.0f;
@@ -751,36 +762,37 @@ void render_settings(BuildingState& state) {
             uint16_t accent;
         };
 
-        SettingsItem items[2] = {
+        SettingsItem items[3] = {
             {"MQTT Setup", state.net.mqtt_ok ? "Broker Connected" : "MQTT Setup", (uint16_t)(state.net.mqtt_ok ? COLOR_STAT_ON : COLOR_STAT_WARN)},
-            {"Device Info", "Name / Class Room", COLOR_STAT_ON}
+            {"Device Info", "Name / Class Room", COLOR_STAT_ON},
+            {"Clock Setup", state.net.use_manual_time ? "Manual Mode" : "NTP Mode", COLOR_STAT_ON}
         };
 
-        const int row_y[2] = {72, 146};
-        for (int i = 0; i < 2; i++) {
-            drawCardBase(20, row_y[i], 440, 62, COLOR_CARD_BG);
-            p_canvas->fillRoundRect(34, row_y[i] + 10, 6, 42, 3, items[i].accent);
+        const int row_y[3] = {58, 126, 194};
+        for (int i = 0; i < 3; i++) {
+            drawCardBase(20, row_y[i], 440, 58, COLOR_CARD_BG);
+            p_canvas->fillRoundRect(34, row_y[i] + 8, 6, 42, 3, items[i].accent);
 
             p_canvas->setTextDatum(TextDatum::MiddleLeft);
             p_canvas->setTextFont(4);
             p_canvas->setTextColor(COLOR_TEXT_MAIN);
-            p_canvas->drawString(items[i].title, 52, row_y[i] + 31);
+            p_canvas->drawString(items[i].title, 52, row_y[i] + 29);
 
             p_canvas->setTextDatum(TextDatum::MiddleRight);
             p_canvas->setTextFont(2);
             p_canvas->setTextColor(COLOR_TEXT_SEC);
-            p_canvas->drawString(items[i].subtitle, 430, row_y[i] + 31);
+            p_canvas->drawString(items[i].subtitle, 430, row_y[i] + 29);
         }
 
-        drawCardBase(20, 226, 440, 54, COLOR_CARD_BG);
+        drawCardBase(20, 262, 440, 38, COLOR_CARD_BG);
         p_canvas->setTextDatum(TextDatum::MiddleLeft);
         p_canvas->setTextFont(2);
         p_canvas->setTextColor(COLOR_TEXT_SEC);
-        p_canvas->drawString("Swipe right to return / Tap MQTT or Device Info", 38, 248);
+        p_canvas->drawString("Swipe right to return / Tap MQTT, Device Info, or Clock", 38, 281);
 
         p_canvas->setTextDatum(TextDatum::MiddleRight);
         p_canvas->setTextColor(state.net.mqtt_ok ? COLOR_STAT_ON : COLOR_STAT_WARN);
-        p_canvas->drawString(state.net.mqtt_ok ? "MQTT OK" : "MQTT offline", 442, 248);
+        p_canvas->drawString(state.net.mqtt_ok ? "MQTT OK" : "MQTT offline", 442, 281);
     }
 
     // Page Dots
@@ -1529,8 +1541,13 @@ static void slave_apply_profile_policy(RS485SlaveState& slave, DeviceProfile pro
     if (!(allowed & RS485_CAP_LUX)) {
         slave.lux_count = 0;
         slave.enabled_mask &= ~RS485_CAP_LUX;
-    } else if (slave.lux_count == 0) {
-        slave.lux_count = 1;
+    } else {
+        if (slave.lux_count == 0) {
+            slave.lux_count = 1;
+        }
+        if (set_defaults) {
+            slave.enabled_mask |= RS485_CAP_LUX;
+        }
     }
 
     if (set_defaults) {
@@ -2386,6 +2403,7 @@ void screens_render(BuildingState& state, int fps) {
             p_canvas->setTextDatum(TextDatum::TopLeft);
             break;
         }
+        case SCREEN_CLOCK_SETUP: render_clock_setup(state);    break;
         case SCREEN_KEYBOARD:    keyboard_draw();              break;
         default: break;
     }
@@ -2441,6 +2459,9 @@ void handle_dashboard_touch_legacy(BuildingState& state, int tx, int ty) {
         else if (isHit(tx, ty, 20, 210, 200, 50)) { state.sensor.ac_on        = !state.sensor.ac_on; send_ac = true; }
         else if (isHit(tx, ty, 240, 203, 110, 47)){ state.sensor.projector_on = !state.sensor.projector_on; send_projector = true; }
         else if (isHit(tx, ty, 362, 203, 110, 47)){ state.sensor.light_on     = !state.sensor.light_on; send_light = true; }
+        if (send_ac) state.sensor.app_controlled_ac = false;
+        if (send_projector) state.sensor.app_controlled_projector = false;
+        if (send_light) state.sensor.app_controlled_light = false;
         ac_power = state.sensor.ac_on;
         ac_target = state.sensor.temp_target;
         ac_fan = state.sensor.ac_fan_speed;
@@ -2580,6 +2601,7 @@ void handle_dashboard_touch(BuildingState& state, int tx, int ty) {
             uint8_t ac_swing = 0;
             data_lock(state);
             state.sensor.ac_on = !state.sensor.ac_on;
+            state.sensor.app_controlled_ac = false;
             ac_power = state.sensor.ac_on;
             ac_target = state.sensor.temp_target;
             ac_fan = state.sensor.ac_fan_speed;
@@ -2601,6 +2623,7 @@ void handle_dashboard_touch(BuildingState& state, int tx, int ty) {
             } else {
                 state.sensor.temp_target = max(16.0f, state.sensor.temp_target - 1.0f);
             }
+            state.sensor.app_controlled_ac = false;
             ac_power = state.sensor.ac_on;
             ac_target = state.sensor.temp_target;
             ac_fan = state.sensor.ac_fan_speed;
@@ -2618,6 +2641,7 @@ void handle_dashboard_touch(BuildingState& state, int tx, int ty) {
             uint8_t ac_swing = 0;
             data_lock(state);
             state.sensor.ac_swing_mode = (state.sensor.ac_swing_mode + 1) % 7;
+            state.sensor.app_controlled_ac = false;
             ac_power = state.sensor.ac_on;
             ac_target = state.sensor.temp_target;
             ac_fan = state.sensor.ac_fan_speed;
@@ -2636,6 +2660,7 @@ void handle_dashboard_touch(BuildingState& state, int tx, int ty) {
             uint8_t ac_swing = 0;
             data_lock(state);
             state.sensor.ac_fan_speed = (state.sensor.ac_fan_speed + 1) % 6;
+            state.sensor.app_controlled_ac = false;
             ac_power = state.sensor.ac_on;
             ac_target = state.sensor.temp_target;
             ac_fan = state.sensor.ac_fan_speed;
@@ -2652,6 +2677,7 @@ void handle_dashboard_touch(BuildingState& state, int tx, int ty) {
         bool projector_power = false;
         data_lock(state);
         state.sensor.projector_on = !state.sensor.projector_on;
+        state.sensor.app_controlled_projector = false;
         projector_power = state.sensor.projector_on;
         state.ui_needs_update = true;
         data_unlock(state);
@@ -2663,6 +2689,7 @@ void handle_dashboard_touch(BuildingState& state, int tx, int ty) {
         bool light_power = false;
         data_lock(state);
         state.sensor.light_on = !state.sensor.light_on;
+        state.sensor.app_controlled_light = false;
         light_power = state.sensor.light_on;
         state.ui_needs_update = true;
         data_unlock(state);
@@ -2671,11 +2698,17 @@ void handle_dashboard_touch(BuildingState& state, int tx, int ty) {
     }
 
     if (led1_rect.w > 0 && hit_rect(tx, ty, led1_rect)) {
+        data_lock(state);
+        state.sensor.app_controlled_light = false;
+        data_unlock(state);
         rs485_request_light_channel_command(1, !model.led_channel_on[0]);
         return;
     }
 
     if (led2_rect.w > 0 && hit_rect(tx, ty, led2_rect)) {
+        data_lock(state);
+        state.sensor.app_controlled_light = false;
+        data_unlock(state);
         rs485_request_light_channel_command(2, !model.led_channel_on[1]);
         return;
     }
@@ -2823,13 +2856,32 @@ void handle_settings_touch_event(BuildingState& state, int tx, int ty, TouchEven
                 }
             } else {
                 // PAGE 2 Items
-                // MQTT Setup: 20, 72, 440, 62
-                if (isHit(tx, ty, 20, 72, 440, 62)) {
+                // MQTT Setup: 20, 58, 440, 58
+                if (isHit(tx, ty, 20, 58, 440, 58)) {
                     screens_set(SCREEN_MQTT_SETUP);
                 }
-                // Device Info: 20, 146, 440, 62
-                else if (isHit(tx, ty, 20, 146, 440, 62)) {
+                // Device Info: 20, 126, 440, 58
+                else if (isHit(tx, ty, 20, 126, 440, 58)) {
                     screens_set(SCREEN_DEVICE_INFO);
+                }
+                // Clock Setup: 20, 194, 440, 58
+                else if (isHit(tx, ty, 20, 194, 440, 58)) {
+                    clock_setup_manual_mode = state.net.use_manual_time;
+                    struct tm timeinfo;
+                    if (getLocalTime(&timeinfo, 5)) {
+                        manual_clock_year   = timeinfo.tm_year + 1900;
+                        manual_clock_month  = timeinfo.tm_mon + 1;
+                        manual_clock_day    = timeinfo.tm_mday;
+                        manual_clock_hour   = timeinfo.tm_hour;
+                        manual_clock_minute = timeinfo.tm_min;
+                    } else {
+                        manual_clock_year   = 2026;
+                        manual_clock_month  = 6;
+                        manual_clock_day    = 17;
+                        manual_clock_hour   = 19;
+                        manual_clock_minute = 47;
+                    }
+                    screens_set(SCREEN_CLOCK_SETUP);
                 }
             }
         }
@@ -3527,6 +3579,7 @@ void screens_handle_touch(BuildingState& state, int tx, int ty) {
         case SCREEN_TEMP_DETAIL: handle_temperature_detail_touch(state, tx, ty); break;
         case SCREEN_DEVICE_INFO: handle_device_info_touch(state, tx, ty); break;
         case SCREEN_MQTT_SETUP: handle_mqtt_setup_touch(state, tx, ty); break;
+        case SCREEN_CLOCK_SETUP: handle_clock_setup_touch(state, tx, ty); break;
         case SCREEN_TOUCH_TEST: break;
         case SCREEN_KEYBOARD:    handle_keyboard_touch(state, tx, ty);    break;
         default: break;
@@ -3554,7 +3607,297 @@ void screens_handle_touch_event(BuildingState& state, int tx, int ty, TouchEvent
         return;
     }
 
+    if (current_screen == SCREEN_CLOCK_SETUP) {
+        if (event == TOUCH_EVENT_DOWN) {
+            handle_clock_setup_touch(state, tx, ty);
+        }
+        return;
+    }
+
     if (event == TOUCH_EVENT_DOWN) {
         screens_handle_touch(state, tx, ty);
     }
 }
+
+static int get_days_in_month(int year, int month) {
+    static const int days[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    if (month < 1 || month > 12) return 31;
+    if (month == 2) {
+        bool leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+        return leap ? 29 : 28;
+    }
+    return days[month - 1];
+}
+
+void render_clock_setup(BuildingState& state) {
+    drawWallpaperBackground();
+
+    p_canvas->setTextDatum(TextDatum::TopLeft);
+    p_canvas->setTextColor(COLOR_TEXT_MAIN);
+    p_canvas->setTextFont(4);
+    p_canvas->drawString("Clock Setup", 20, 10);
+
+    // BACK button
+    drawCardBase(338, 8, 122, 38, COLOR_STAT_OFF);
+    p_canvas->setTextDatum(TextDatum::MiddleCenter);
+    p_canvas->setTextFont(2);
+    p_canvas->setTextColor(COLOR_TEXT_MAIN);
+    p_canvas->drawString("BACK", 399, 27);
+
+    // Left side panel
+    // Mode Switch Button (NTP / MANUAL)
+    uint16_t mode_color = clock_setup_manual_mode ? COLOR_STAT_WARN : COLOR_STAT_ON;
+    drawCardBase(20, 58, 180, 48, COLOR_CARD_BG);
+    p_canvas->fillRoundRect(34, 58 + 10, 6, 28, 3, mode_color);
+    p_canvas->setTextDatum(TextDatum::MiddleLeft);
+    p_canvas->setTextFont(2);
+    p_canvas->setTextColor(COLOR_TEXT_SEC);
+    p_canvas->drawString("MODE", 52, 72);
+    p_canvas->setTextFont(4);
+    p_canvas->setTextColor(COLOR_TEXT_MAIN);
+    p_canvas->drawString(clock_setup_manual_mode ? "MANUAL" : "NTP", 52, 92);
+
+    // CANCEL button
+    drawCardBase(20, 126, 180, 48, COLOR_CARD_BG);
+    p_canvas->fillRoundRect(34, 126 + 10, 6, 28, 3, COLOR_STAT_OFF);
+    p_canvas->setTextDatum(TextDatum::MiddleLeft);
+    p_canvas->setTextFont(4);
+    p_canvas->setTextColor(COLOR_TEXT_MAIN);
+    p_canvas->drawString("CANCEL", 52, 150);
+
+    // SAVE & APPLY button
+    drawCardBase(20, 194, 180, 48, COLOR_CARD_BG);
+    p_canvas->fillRoundRect(34, 194 + 10, 6, 28, 3, COLOR_STAT_ON);
+    p_canvas->setTextDatum(TextDatum::MiddleLeft);
+    p_canvas->setTextFont(4);
+    p_canvas->setTextColor(COLOR_TEXT_MAIN);
+    p_canvas->drawString("SAVE", 52, 218);
+
+    // Status message at the bottom left
+    p_canvas->setTextDatum(TextDatum::MiddleLeft);
+    p_canvas->setTextFont(2);
+    p_canvas->setTextColor(COLOR_TEXT_SEC);
+    p_canvas->drawString(clock_setup_manual_mode ? "Set clock manually" : "NTP time sync active", 20, 270);
+
+    // Right side: adjustment columns
+    drawCardBase(220, 58, 240, 180, COLOR_CARD_BG);
+
+    uint16_t text_color = clock_setup_manual_mode ? COLOR_TEXT_MAIN : COLOR_TEXT_SEC;
+    uint16_t button_text_color = clock_setup_manual_mode ? COLOR_ACCENT_MAIN : COLOR_STAT_OFF;
+
+    char buf[8];
+
+    // Day column
+    if (clock_setup_manual_mode) {
+        drawCardBase(235, 70, 30, 24, COLOR_BG_MAIN);
+    }
+    p_canvas->setTextDatum(TextDatum::MiddleCenter);
+    p_canvas->setTextFont(2);
+    p_canvas->setTextColor(button_text_color);
+    p_canvas->drawString("+", 250, 82);
+    p_canvas->setTextFont(4);
+    p_canvas->setTextColor(text_color);
+    snprintf(buf, sizeof(buf), "%02d", manual_clock_day);
+    p_canvas->drawString(buf, 250, 119);
+    if (clock_setup_manual_mode) {
+        drawCardBase(235, 144, 30, 24, COLOR_BG_MAIN);
+    }
+    p_canvas->setTextFont(2);
+    p_canvas->setTextColor(button_text_color);
+    p_canvas->drawString("-", 250, 156);
+    p_canvas->setTextColor(COLOR_TEXT_SEC);
+    p_canvas->drawString("Day", 250, 192);
+
+    // Month column
+    if (clock_setup_manual_mode) {
+        drawCardBase(275, 70, 30, 24, COLOR_BG_MAIN);
+    }
+    p_canvas->setTextColor(button_text_color);
+    p_canvas->drawString("+", 290, 82);
+    p_canvas->setTextFont(4);
+    p_canvas->setTextColor(text_color);
+    snprintf(buf, sizeof(buf), "%02d", manual_clock_month);
+    p_canvas->drawString(buf, 290, 119);
+    if (clock_setup_manual_mode) {
+        drawCardBase(275, 144, 30, 24, COLOR_BG_MAIN);
+    }
+    p_canvas->setTextFont(2);
+    p_canvas->setTextColor(button_text_color);
+    p_canvas->drawString("-", 290, 156);
+    p_canvas->setTextColor(COLOR_TEXT_SEC);
+    p_canvas->drawString("Mon", 290, 192);
+
+    // Year column
+    if (clock_setup_manual_mode) {
+        drawCardBase(320, 70, 40, 24, COLOR_BG_MAIN);
+    }
+    p_canvas->setTextColor(button_text_color);
+    p_canvas->drawString("+", 340, 82);
+    p_canvas->setTextFont(4);
+    p_canvas->setTextColor(text_color);
+    snprintf(buf, sizeof(buf), "%04d", manual_clock_year);
+    p_canvas->drawString(buf, 340, 119);
+    if (clock_setup_manual_mode) {
+        drawCardBase(320, 144, 40, 24, COLOR_BG_MAIN);
+    }
+    p_canvas->setTextFont(2);
+    p_canvas->setTextColor(button_text_color);
+    p_canvas->drawString("-", 340, 156);
+    p_canvas->setTextColor(COLOR_TEXT_SEC);
+    p_canvas->drawString("Year", 340, 192);
+
+    // Hour column
+    if (clock_setup_manual_mode) {
+        drawCardBase(375, 70, 30, 24, COLOR_BG_MAIN);
+    }
+    p_canvas->setTextColor(button_text_color);
+    p_canvas->drawString("+", 390, 82);
+    p_canvas->setTextFont(4);
+    p_canvas->setTextColor(text_color);
+    snprintf(buf, sizeof(buf), "%02d", manual_clock_hour);
+    p_canvas->drawString(buf, 390, 119);
+    if (clock_setup_manual_mode) {
+        drawCardBase(375, 144, 30, 24, COLOR_BG_MAIN);
+    }
+    p_canvas->setTextFont(2);
+    p_canvas->setTextColor(button_text_color);
+    p_canvas->drawString("-", 390, 156);
+    p_canvas->setTextColor(COLOR_TEXT_SEC);
+    p_canvas->drawString("Hour", 390, 192);
+
+    // Minute column
+    if (clock_setup_manual_mode) {
+        drawCardBase(415, 70, 30, 24, COLOR_BG_MAIN);
+    }
+    p_canvas->setTextColor(button_text_color);
+    p_canvas->drawString("+", 430, 82);
+    p_canvas->setTextFont(4);
+    p_canvas->setTextColor(text_color);
+    snprintf(buf, sizeof(buf), "%02d", manual_clock_minute);
+    p_canvas->drawString(buf, 430, 119);
+    if (clock_setup_manual_mode) {
+        drawCardBase(415, 144, 30, 24, COLOR_BG_MAIN);
+    }
+    p_canvas->setTextFont(2);
+    p_canvas->setTextColor(button_text_color);
+    p_canvas->drawString("-", 430, 156);
+    p_canvas->setTextColor(COLOR_TEXT_SEC);
+    p_canvas->drawString("Min", 430, 192);
+
+    p_canvas->setTextDatum(TextDatum::TopLeft);
+}
+
+void handle_clock_setup_touch(BuildingState& state, int tx, int ty) {
+    if (isHit(tx, ty, 338, 8, 122, 38) || isHit(tx, ty, 20, 126, 180, 48)) {
+        screens_set(SCREEN_SETTINGS);
+        return;
+    }
+
+    if (isHit(tx, ty, 20, 58, 180, 48)) {
+        clock_setup_manual_mode = !clock_setup_manual_mode;
+        data_lock(state);
+        state.ui_needs_update = true;
+        data_unlock(state);
+        return;
+    }
+
+    if (isHit(tx, ty, 20, 194, 180, 48)) {
+        data_lock(state);
+        state.net.use_manual_time = clock_setup_manual_mode;
+        state.ui_needs_update = true;
+        data_unlock(state);
+        data_save_device_config(state);
+
+        if (clock_setup_manual_mode) {
+            time_manager_set_manual(manual_clock_year, manual_clock_month, manual_clock_day, manual_clock_hour, manual_clock_minute);
+        }
+        screens_set(SCREEN_SETTINGS);
+        return;
+    }
+
+    if (clock_setup_manual_mode) {
+        bool changed = false;
+
+        // Day Plus: 235, 70, 30, 24
+        if (isHit(tx, ty, 235, 70, 30, 24)) {
+            manual_clock_day++;
+            int max_days = get_days_in_month(manual_clock_year, manual_clock_month);
+            if (manual_clock_day > max_days) manual_clock_day = 1;
+            changed = true;
+        }
+        // Day Minus: 235, 144, 30, 24
+        else if (isHit(tx, ty, 235, 144, 30, 24)) {
+            manual_clock_day--;
+            int max_days = get_days_in_month(manual_clock_year, manual_clock_month);
+            if (manual_clock_day < 1) manual_clock_day = max_days;
+            changed = true;
+        }
+
+        // Month Plus: 275, 70, 30, 24
+        else if (isHit(tx, ty, 275, 70, 30, 24)) {
+            manual_clock_month++;
+            if (manual_clock_month > 12) manual_clock_month = 1;
+            int max_days = get_days_in_month(manual_clock_year, manual_clock_month);
+            if (manual_clock_day > max_days) manual_clock_day = max_days;
+            changed = true;
+        }
+        // Month Minus: 275, 144, 30, 24
+        else if (isHit(tx, ty, 275, 144, 30, 24)) {
+            manual_clock_month--;
+            if (manual_clock_month < 1) manual_clock_month = 12;
+            int max_days = get_days_in_month(manual_clock_year, manual_clock_month);
+            if (manual_clock_day > max_days) manual_clock_day = max_days;
+            changed = true;
+        }
+
+        // Year Plus: 320, 70, 40, 24
+        else if (isHit(tx, ty, 320, 70, 40, 24)) {
+            manual_clock_year++;
+            if (manual_clock_year > 2099) manual_clock_year = 2024;
+            int max_days = get_days_in_month(manual_clock_year, manual_clock_month);
+            if (manual_clock_day > max_days) manual_clock_day = max_days;
+            changed = true;
+        }
+        // Year Minus: 320, 144, 40, 24
+        else if (isHit(tx, ty, 320, 144, 40, 24)) {
+            manual_clock_year--;
+            if (manual_clock_year < 2024) manual_clock_year = 2099;
+            int max_days = get_days_in_month(manual_clock_year, manual_clock_month);
+            if (manual_clock_day > max_days) manual_clock_day = max_days;
+            changed = true;
+        }
+
+        // Hour Plus: 375, 70, 30, 24
+        else if (isHit(tx, ty, 375, 70, 30, 24)) {
+            manual_clock_hour++;
+            if (manual_clock_hour > 23) manual_clock_hour = 0;
+            changed = true;
+        }
+        // Hour Minus: 375, 144, 30, 24
+        else if (isHit(tx, ty, 375, 144, 30, 24)) {
+            manual_clock_hour--;
+            if (manual_clock_hour < 0) manual_clock_hour = 23;
+            changed = true;
+        }
+
+        // Minute Plus: 415, 70, 30, 24
+        else if (isHit(tx, ty, 415, 70, 30, 24)) {
+            manual_clock_minute++;
+            if (manual_clock_minute > 59) manual_clock_minute = 0;
+            changed = true;
+        }
+        // Minute Minus: 415, 144, 30, 24
+        else if (isHit(tx, ty, 415, 144, 30, 24)) {
+            manual_clock_minute--;
+            if (manual_clock_minute < 0) manual_clock_minute = 59;
+            changed = true;
+        }
+
+        if (changed) {
+            data_lock(state);
+            state.ui_needs_update = true;
+            data_unlock(state);
+        }
+    }
+}
+

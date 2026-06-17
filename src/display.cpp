@@ -11,7 +11,7 @@ void display_init() {
     digitalWrite(TOUCH_CS, HIGH);
 
     tft.init();
-    tft.setRotation(3);       // Landscape 480x320, rotated 180 deg for inverted mounting
+    tft.setRotation(1);      
     tft.invertDisplay(false);
     tft.fillScreen(COLOR_BG_MAIN);
     tft.setBrightness(200);   // ~78% brightness on boot

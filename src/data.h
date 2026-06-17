@@ -11,12 +11,34 @@
 #define DASHBOARD_LOGICAL_SLOT_COUNT 9
 #define RS485_DUMMY_UI_UID 0xD00D0001UL
 #define DAILY_SCHEDULE_MAX_SLOTS 8
+#define SCHEDULE_SESSION_COUNT 6
+#define SCHEDULE_DAYS 7
+
+// BINUS session times: S1..S6
+// Each session is 100 min, gap 20 min between sessions
+// S1: 07:20-09:00, S2: 09:20-11:00, S3: 11:20-13:00
+// S4: 13:20-15:00, S5: 15:20-17:00, S6: 17:20-19:00
+struct SessionConfig {
+    uint8_t start_hour;   // 7 for S1
+    uint8_t start_min;    // 20 for S1
+    uint8_t end_hour;     // 9 for S1
+    uint8_t end_min;      // 0 for S1
+};
 
 struct DailyScheduleSlot {
     uint16_t start_min;
     uint16_t end_min;
     bool     pre_triggered;
     bool     end_triggered;
+};
+
+// New weekly schedule: 6-digit bitmask per day
+// Examples:
+//   010011 -> sessions 2,5,6 active
+//   111111 -> all sessions active
+struct WeeklyScheduleData {
+    uint8_t day_mask[SCHEDULE_DAYS]; // Monday=0..Sunday=6, bit0=S1..bit5=S6
+    bool    valid;
 };
 
 enum CapabilityBit : uint16_t {
@@ -230,9 +252,19 @@ struct SensorData {
     uint8_t  proj_retry_count;
     bool     proj_hardware_failed;
 
-    // Scheduler fields
+    // Scheduler fields (NEW weekly format)
     bool     sched_shutdown_active;
     uint32_t sched_shutdown_timer_ms;
+    WeeklyScheduleData sched_weekly;        // weekly bitmask schedule (from DB at 00:00)
+    bool     sched_active_sessions[6];      // computed: which sessions are active today
+    uint8_t  sched_active_session_count;    // how many active sessions today
+    uint8_t  sched_today_sessions_bitmask;  // bitmask for today (cached)
+    uint32_t sched_last_triggered_min;      // last minute we triggered a session (to avoid repeat)
+    bool     sched_retry_pending;           // true if a session start was missed and needs retry
+    uint32_t sched_retry_check_ms;          // when to retry the missed turn-on
+    uint8_t  sched_retry_session;           // which session needs retry
+
+    // Legacy fields (kept for NVS backward compat only, not used in logic)
     uint32_t schedule_date_yyyymmdd;
     uint8_t  schedule_slot_count;
     DailyScheduleSlot schedule_slots[DAILY_SCHEDULE_MAX_SLOTS];
@@ -244,6 +276,10 @@ struct SensorData {
     uint16_t light_history_min[7];
     uint32_t light_day_count;
     bool     light_anomaly_alert;
+    bool     data_collect_mode;
+    bool     app_controlled_ac;
+    bool     app_controlled_light;
+    bool     app_controlled_projector;
 };
 
 struct NetworkState {
@@ -300,6 +336,7 @@ struct NetworkState {
     uint8_t wifi_scan_start_attempts;
     char  wifi_scan_status[64];
     WiFiScanResult wifi_scan_results[WIFI_SCAN_MAX_RESULTS];
+    bool  use_manual_time;
 };
 
 struct BuildingState {
@@ -338,5 +375,16 @@ const char* device_profile_name(DeviceProfile profile);
 const char* device_registry_status_name(DeviceRegistryStatus status);
 uint16_t device_profile_capability_mask(DeviceProfile profile);
 DeviceProfile device_profile_from_capabilities(uint16_t capability);
+
+// Schedule helper functions
+void schedule_get_session_time(uint8_t session_index, uint8_t& start_hour, uint8_t& start_min,
+                                uint8_t& end_hour, uint8_t& end_min);
+uint16_t schedule_get_session_start_min(uint8_t session_index);
+uint16_t schedule_get_session_end_min(uint8_t session_index);
+uint16_t schedule_get_pre_start_min(uint8_t session_index); // 20 min before start
+uint8_t  schedule_get_day_of_week(); // 0=Monday..6=Sunday, returns 255 if time not synced
+bool     schedule_is_session_active(const WeeklyScheduleData& wsd, uint8_t day_index, uint8_t session_index);
+uint8_t  schedule_get_active_sessions_today(const WeeklyScheduleData& wsd);
+const char* schedule_get_day_name(uint8_t day_index);
 
 #endif

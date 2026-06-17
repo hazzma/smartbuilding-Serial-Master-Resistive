@@ -16,6 +16,12 @@ static bool slave_temp_channel_enabled(const RS485SlaveState& slave, uint8_t cha
            (slave.temp_enabled_mask & (1 << channel));
 }
 
+static bool is_ir_node(const RS485SlaveState& slave) {
+    return slave.profile == IR_COMBO_NODE || 
+           (slave.enabled_mask & (CAP_PROJECTOR_IR | CAP_AC_IR)) || 
+           (slave.capability & (CAP_PROJECTOR_IR | CAP_AC_IR));
+}
+
 static RS485SlaveState* find_slave_by_mapping_locked(BuildingState& state, const LogicalMapping& mapping) {
     uint8_t count = state.rs485.slave_count;
     if (count > RS485_MAX_SLAVES) count = RS485_MAX_SLAVES;
@@ -57,6 +63,12 @@ static bool mapping_source_usable_locked(BuildingState& state, const LogicalMapp
         return slave_temp_channel_enabled(*slave, mapping.channel);
     }
 
+    if (mapping.logical_id == LOGICAL_LUX_MAIN) {
+        if (is_ir_node(*slave)) {
+            return false;
+        }
+    }
+
     return slave_has_enabled_capability(*slave, mapping.capability_type);
 }
 
@@ -71,6 +83,12 @@ static bool mapping_source_configured_locked(BuildingState& state, const Logical
                (slave->enabled_mask & CAP_TEMP) &&
                (slave->temp_available_mask & (1 << mapping.channel)) &&
                (slave->temp_enabled_mask & (1 << mapping.channel));
+    }
+
+    if (mapping.logical_id == LOGICAL_LUX_MAIN) {
+        if (is_ir_node(*slave)) {
+            return false;
+        }
     }
 
     return (slave->enabled_mask & mapping.capability_type) != 0;
@@ -147,24 +165,35 @@ static bool mapping_matches_slave(const LogicalMapping& mapping, const RS485Slav
 
 static void auto_assign_room_lux_locked(BuildingState& state) {
     LogicalMapping& lux_mapping = state.rs485.mappings[LOGICAL_LUX_MAIN];
-    const LogicalMapping& projector_mapping = state.rs485.mappings[LOGICAL_PROJECTOR_CONTROL];
     RS485SlaveState* current_lux_slave =
         lux_mapping.assigned ? find_slave_by_mapping_locked(state, lux_mapping) : nullptr;
-    if (current_lux_slave && mapping_matches_slave(projector_mapping, *current_lux_slave)) {
+    if (current_lux_slave && is_ir_node(*current_lux_slave)) {
         lux_mapping.slave_uid = 0;
         lux_mapping.slave_addr = 0;
         lux_mapping.channel = 0;
         lux_mapping.assigned = false;
         lux_mapping.manual_override = false;
     }
-    if (lux_mapping.assigned || lux_mapping.manual_override) return;
 
+    // Auto-heal: Ensure non-IR nodes with hardware Lux capability have it enabled in enabled_mask
     uint8_t count = state.rs485.slave_count;
     if (count > RS485_MAX_SLAVES) count = RS485_MAX_SLAVES;
     for (uint8_t i = 0; i < count; i++) {
         RS485SlaveState& slave = state.rs485.slaves[i];
+        if (slave.online && (slave.capability & CAP_LUX)) {
+            if (!is_ir_node(slave) && !(slave.enabled_mask & CAP_LUX)) {
+                slave.enabled_mask |= CAP_LUX;
+                if (slave.lux_count == 0) slave.lux_count = 1;
+            }
+        }
+    }
+
+    if (lux_mapping.assigned || lux_mapping.manual_override) return;
+
+    for (uint8_t i = 0; i < count; i++) {
+        RS485SlaveState& slave = state.rs485.slaves[i];
         if (!slave_has_enabled_capability(slave, CAP_LUX)) continue;
-        if (mapping_matches_slave(projector_mapping, slave)) continue;
+        if (is_ir_node(slave)) continue;
         assign_mapping(lux_mapping, slave, 0);
         return;
     }
@@ -201,15 +230,15 @@ static void compose_dashboard_locked(BuildingState& state) {
 
     const LogicalMapping& lux_mapping = state.rs485.mappings[LOGICAL_LUX_MAIN];
     RS485SlaveState* lux_slave = lux_mapping.assigned ? find_slave_by_mapping_locked(state, lux_mapping) : nullptr;
-    const LogicalMapping& projector_mapping = state.rs485.mappings[LOGICAL_PROJECTOR_CONTROL];
-    bool lux_is_projector_source = lux_slave && mapping_matches_slave(projector_mapping, *lux_slave);
-    if (lux_slave && !lux_is_projector_source &&
+    bool is_ir_slave = lux_slave && is_ir_node(*lux_slave);
+    if (lux_slave && !is_ir_slave &&
         slave_has_enabled_capability(*lux_slave, CAP_LUX) && lux_slave->lux_valid) {
         next.lux = lux_slave->lux;
         next.lux_valid = true;
         memcpy(next.lux_channel, lux_slave->lux_channel, sizeof(next.lux_channel));
         memcpy(next.lux_channel_valid, lux_slave->lux_channel_valid, sizeof(next.lux_channel_valid));
     }
+    state.sensor.lux = next.lux_valid ? next.lux : -1.0f; // Synchronize legacy state
 
     const LogicalMapping& human_mapping = state.rs485.mappings[LOGICAL_HUMAN_PRESENCE_MAIN];
     RS485SlaveState* human_slave = human_mapping.assigned ? find_slave_by_mapping_locked(state, human_mapping) : nullptr;
@@ -223,6 +252,7 @@ static void compose_dashboard_locked(BuildingState& state) {
     RS485SlaveState* ac_slave = ac_mapping.assigned ? find_slave_by_mapping_locked(state, ac_mapping) : nullptr;
     next.ac_available = ac_slave && slave_has_enabled_capability(*ac_slave, CAP_AC_IR);
 
+    const LogicalMapping& projector_mapping = state.rs485.mappings[LOGICAL_PROJECTOR_CONTROL];
     RS485SlaveState* projector_slave = projector_mapping.assigned ? find_slave_by_mapping_locked(state, projector_mapping) : nullptr;
     next.projector_available = projector_slave && slave_has_enabled_capability(*projector_slave, CAP_PROJECTOR_IR);
 

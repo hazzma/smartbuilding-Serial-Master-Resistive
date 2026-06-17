@@ -26,7 +26,7 @@ static const uint32_t RS485_RESPONSE_TIMEOUT_MS = 100;
 static const uint8_t RS485_RETRY_COUNT = 1;
 // One poll interval advances one registry slot, not every slave at once.
 // Failed-attempt thresholds count both the initial request and its retry.
-static const uint32_t RS485_POLL_INTERVAL_MS = 1000;
+static const uint32_t RS485_POLL_INTERVAL_MS = 300;
 static const uint32_t RS485_PAIRING_SCAN_INTERVAL_MS = 700;
 static const uint32_t RS485_PAIRING_KNOWN_SCAN_WINDOW_MS = 4000;
 static const uint32_t RS485_IDENTITY_SYNC_INTERVAL_MS = 10000;
@@ -1268,7 +1268,8 @@ static void rs485_seed_fake_pairing_candidate() {
 
 static bool rs485_temp_value_valid(uint16_t raw) {
     return raw != RS485_MODBUS_TEMP_ERROR_SENTINEL &&
-           raw != RS485_MODBUS_TEMP_UNASSIGNED;
+           raw != RS485_MODBUS_TEMP_UNASSIGNED &&
+           ((int16_t)raw) > 0; // Reject <= 0.0C (including -1.0C error code)
 }
 
 static bool rs485_temp_channel_assigned(uint16_t raw) {
@@ -2427,6 +2428,16 @@ static void rs485_debug_serial_loop() {
             continue;
         }
 
+        if ((c == 'd' || c == 'D') && debug_line_len == 0) {
+            data_lock(g_state);
+            g_state.sensor.data_collect_mode = !g_state.sensor.data_collect_mode;
+            bool current_mode = g_state.sensor.data_collect_mode;
+            data_unlock(g_state);
+            data_save_device_config(g_state);
+            Serial.printf("[SYSTEM] Mode Ambil Data: %s\n", current_mode ? "AKTIF (Kirim 10s)" : "NON-AKTIF (Mode Biasa)");
+            continue;
+        }
+
         if (c == '\r') continue;
         if (c == '\n') {
             debug_line[debug_line_len] = '\0';
@@ -2666,10 +2677,12 @@ static void rs485_handle_projector_verification() {
     if (g_state.sensor.proj_verif_state == 6 &&
         g_state.sensor.proj_warning_until_ms != 0 &&
         (int32_t)(millis() - g_state.sensor.proj_warning_until_ms) >= 0) {
-        g_state.sensor.proj_verif_state = 2; // VERIFIED_ON visual state after warning timeout
+        g_state.sensor.proj_verif_state = 0; // Transition to OFF
+        g_state.sensor.projector_on = false; // Turn OFF
         g_state.sensor.proj_hardware_failed = false;
         g_state.sensor.proj_warning_until_ms = 0;
         g_state.ui_needs_update = true;
+        Serial.println("[Projector] Warning timeout. Verification failed, turning OFF.");
     }
 
     if (g_state.sensor.proj_verif_state == 1 || g_state.sensor.proj_verif_state == 3) {

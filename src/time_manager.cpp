@@ -47,6 +47,7 @@ static bool time_update_display_string(const char* source) {
     strftime(next_time, sizeof(next_time), "%H:%M", &timeinfo);
 
     const bool rtc_source = strcmp(source, "RTC") == 0;
+    const bool manual_source = strcmp(source, "Manual") == 0;
     data_lock(g_state);
     bool changed = strcmp(g_state.net.time_str, next_time) != 0 ||
                    !g_state.net.time_synced ||
@@ -58,7 +59,7 @@ static bool time_update_display_string(const char* source) {
     strncpy(g_state.net.time_source, source, sizeof(g_state.net.time_source) - 1);
     g_state.net.time_source[sizeof(g_state.net.time_source) - 1] = '\0';
     strncpy(g_state.net.time_status,
-            rtc_source ? "RTC running" : "Time synced",
+            rtc_source ? "RTC running" : (manual_source ? "Manual time" : "Time synced"),
             sizeof(g_state.net.time_status) - 1);
     g_state.net.time_status[sizeof(g_state.net.time_status) - 1] = '\0';
     if (changed) g_state.ui_needs_update = true;
@@ -158,6 +159,32 @@ static void lan_ntp_poll() {
 }
 
 void time_manager_update() {
+    bool manual = false;
+    data_lock(g_state);
+    manual = g_state.net.use_manual_time;
+    data_unlock(g_state);
+
+    static bool last_manual = false;
+    if (manual != last_manual) {
+        last_manual = manual;
+        if (!manual) {
+            // Manual -> NTP transition
+            wifi_ntp_started = false;
+            last_success_ms = 0;
+            lan_ntp_state = LanNtpState::IDLE;
+            lan_ntp_fail_count = 0;
+            time_set_status("Waiting for NTP", "-", false, false);
+            Serial.println("[TIME] Switched to NTP mode - triggering sync");
+        } else {
+            Serial.println("[TIME] Switched to Manual mode - skipping NTP");
+        }
+    }
+
+    if (manual) {
+        time_update_display_string("Manual");
+        return;
+    }
+
     lan_ntp_poll();
 
     bool wifi_connected = WiFi.status() == WL_CONNECTED;
@@ -201,3 +228,25 @@ void time_manager_update() {
         }
     }
 }
+
+void time_manager_set_manual(int year, int month, int day, int hour, int minute) {
+    struct tm t;
+    t.tm_year = year - 1900;
+    t.tm_mon = month - 1;
+    t.tm_mday = day;
+    t.tm_hour = hour;
+    t.tm_min = minute;
+    t.tm_sec = 0;
+    t.tm_isdst = -1;
+    time_t epoch = mktime(&t);
+    if (epoch != (time_t)-1) {
+        struct timeval tv = { .tv_sec = epoch, .tv_usec = 0 };
+        settimeofday(&tv, NULL);
+        time_update_display_string("Manual");
+        Serial.printf("[TIME] Manual time set to %04d-%02d-%02d %02d:%02d:00\n",
+                      year, month, day, hour, minute);
+    } else {
+        Serial.println("[TIME] Failed to convert manual time fields to epoch!");
+    }
+}
+
