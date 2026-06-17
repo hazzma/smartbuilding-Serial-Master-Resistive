@@ -12,6 +12,7 @@ static const uint32_t WIFI_SCAN_RETRY_DELAY_MS = 900;
 static const uint8_t WIFI_SCAN_START_MAX_ATTEMPTS = 2;
 static uint32_t wifi_scan_start_ready_ms = 0;
 static uint32_t wifi_scan_retry_at_ms = 0;
+static uint32_t wifi_scan_prepare_start_ms = 0;
 
 void wifi_manager_init() {
     prefs.begin("wifi_cfg", false);
@@ -196,12 +197,15 @@ static void wifi_scan_prepare_start() {
     WiFi.scanDelete();
     wifi_scan_start_ready_ms = millis() + WIFI_SCAN_RADIO_WARMUP_MS;
     wifi_scan_retry_at_ms = 0;
+    wifi_scan_prepare_start_ms = millis();
 
     data_lock(g_state);
     g_state.net.wifi_scan_requested = false;
     g_state.net.wifi_scan_start_pending = true;
     g_state.net.wifi_scan_radio_warming = true;
     g_state.net.wifi_scan_start_attempts = 0;
+    g_state.net.wifi_connected = false;
+    g_state.net.mqtt_ok = false;
     strncpy(g_state.net.wifi_scan_status,
             wifi_scan_restore_connect ? "Pausing WiFi for scan..." : "Preparing WiFi radio...",
             sizeof(g_state.net.wifi_scan_status) - 1);
@@ -239,6 +243,21 @@ static void wifi_scan_start_async() {
     data_unlock(g_state);
 
     if (millis() < wifi_scan_start_ready_ms || millis() < wifi_scan_retry_at_ms) return;
+
+    // Ensure at least 1500ms has elapsed since disconnect was triggered to let RF driver settle
+    if (millis() - wifi_scan_prepare_start_ms < 1500) {
+        wifi_scan_start_ready_ms = millis() + 100;
+        return;
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        if (millis() - wifi_scan_prepare_start_ms < 3000) {
+            wifi_scan_start_ready_ms = millis() + 200;
+            return;
+        } else {
+            Serial.println("[SCAN] Timeout waiting for disconnect, starting scan while connected");
+        }
+    }
 
     if (WiFi.getMode() == WIFI_OFF) {
         WiFi.mode(WIFI_STA);

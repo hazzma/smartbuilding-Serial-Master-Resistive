@@ -453,17 +453,25 @@ pio device monitor -b 115200
 
 ## Documentation
 
-Start with [docs/README.md](docs/README.md).
+Start with the central documentation index: [docs/README.md](docs/README.md).
 
-Important docs:
+### 📚 Daftar Isi Dokumentasi Rancangan (Documentation Table of Contents)
 
-- [Functional Specification](docs/FSD_Smart_Building_Master_UPDATED.md)
-- [UI/UX Specification](docs/UIUX.md)
-- [RS485 Modbus Architecture](docs/Smart_Building_RS485_Modbus_Architecture.md)
-- [RS485 Master Discovery and Recovery Flow](docs/RS485_Master_Discovery_Recovery_Flow_ID.md)
-- [Connectivity and Dashboard Mapping](docs/Smart_Building_Connectivity_Dashboard_Mapping_Design_UPDATED.md)
-- [Flutter MQTT Requirements](docs/Flutter_App_MQTT_Requirements.md)
-- [Current Slave Contract](<docs/From_SLave/RS485_Modbus_Slave_Firmware_Contract v2.md>)
+Jika Anda ingin melihat rancangan sistem atau mencari referensi teknis tertentu, silakan merujuk ke dokumen-dokumen berikut:
+
+| Nama Rancangan / Topik | Link Dokumen | Deskripsi Isi Dokumen |
+| :--- | :--- | :--- |
+| **Indeks Utama Dokumen** | 📂 [docs/README.md](docs/README.md) | Titik awal panduan indeks seluruh dokumen arsitektur dan spesifikasi. |
+| **Spesifikasi Fungsi (FSD)** | 📄 [FSD_Smart_Building_Master_UPDATED.md](docs/FSD_Smart_Building_Master_UPDATED.md) | Persyaratan sistem utama master, logika behavior Firmware V2, and catatan dampak implementasi. |
+| **Desain Antarmuka (UI/UX)** | 🎨 [UIUX.md](docs/UIUX.md) | Desain dashboard, Empty State, widget, Slave Manager, dan navigasi layar sentuh. |
+| **Kalibrasi Layar Sentuh** | 🎯 [Calibration_TC.md](docs/Calibration_TC.md) | Rumus kalibrasi layar XPT2046, jangkar koreksi aktif (anchors), riwayat deviasi, dan prosedur re-test. |
+| **Arsitektur RS485 Modbus** | 🔌 [Smart_Building_RS485_Modbus_Architecture.md](docs/Smart_Building_RS485_Modbus_Architecture.md) | Arsitektur aktif Modbus RTU pada bus RS485. |
+| **Alur Penemuan & Pemulihan Node** | 🔄 [RS485_Master_Discovery_Recovery_Flow_ID.md](docs/RS485_Master_Discovery_Recovery_Flow_ID.md) | Panduan bahasa Indonesia untuk proses Discovery (pairing) alamat 247, pemulihan otomatis slave tersimpan, dan timing delay. |
+| **Pemetaan Dashboard & Fitur** | 📊 [Smart_Building_Connectivity_Dashboard_Mapping_Design_UPDATED.md](docs/Smart_Building_Connectivity_Dashboard_Mapping_Design_UPDATED.md) | Cara kerja Slave Manager, manajemen konfigurasi Device Profile, dan pemetaan data fisik ke slot HMI. |
+| **Integrasi Aplikasi Flutter (MQTT)** | 📱 [Flutter_App_MQTT_Requirements.md](docs/Flutter_App_MQTT_Requirements.md) | Aturan payload MQTT per-sensor dan topik perintah aktuator untuk integrasi aplikasi mobile. |
+| **Catatan Perubahan MQTT V2.5** | 📝 [MQTT_V2.5_Changelog.md](docs/MQTT_V2.5_Changelog.md) | Format runtime topik V2.5, integrasi EMQX broker, dan notes kompatibilitas. |
+| **Kontrak Firmware Slave** | 🤝 [RS485_Modbus_Slave_Firmware_Contract v2.md](docs/From_SLave/RS485_Modbus_Slave_Firmware_Contract%20v2.md) | Spesifikasi kontrak register fisik Modbus V2.1.0 yang disepakati dengan perangkat slave. |
+| **Perencanaan Fitur V2.8** | ⚙️ [V2.8_Planning.md](docs/V2.8_Planning.md) | Rencana implementasi penjadwalan lokal (schedule), monitoring performa pendingin AC (Alert Bit 6), dan pembagian data Lux. |
 
 ## Current Notes
 
