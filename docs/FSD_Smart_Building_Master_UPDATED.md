@@ -1147,7 +1147,7 @@ Firmware V2 SHALL use the following MQTT delivery policy unless a later team dec
 |---|---:|---|---|
 | Simple sensor publish | 0 | true | Integer payloads such as CO2, presence, and future simple scalar sensors. |
 | LED/projector state publish | 1 | true | Integer `1` or `0` payload. |
-| Temperature average publish | 0 | true | Integer average Celsius payload. |
+| Temperature average publish | 0 | true | Float average Celsius payload with one decimal place. |
 | Actuator command subscribe/publish from app | 1 | false | Commands must not be retained to avoid replaying old actuator actions after reconnect. |
 | Master status publish | 1 | true | Online/status metadata for app/device discovery and last-known state. |
 
