@@ -667,6 +667,11 @@ static bool mqtt_parse_weekly_schedule(char* payload_str) {
     g_state.sensor.sched_retry_pending = false;
     g_state.sensor.sched_retry_check_ms = 0;
     g_state.sensor.sched_retry_session = 0;
+    // Reset trigger masks so sessions can fire again for the new schedule.
+    // Without this, if a schedule is re-sent during or after the pre-class
+    // window, the bit is already set and the automation trigger never fires.
+    g_state.sensor.sched_pre_start_triggered_mask = 0;
+    g_state.sensor.sched_start_triggered_mask = 0;
 
     // Cache today's active sessions
     uint8_t today_bitmask = 0;
