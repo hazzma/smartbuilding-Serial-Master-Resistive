@@ -1865,7 +1865,7 @@ void rs485_request_projector_command(bool power, uint8_t input) {
             g_state.sensor.proj_hardware_failed = false;
         } else {
             g_state.sensor.proj_verif_state = 1; // POWERING_ON
-            g_state.sensor.proj_warmup_timer_ms = millis() + 8000;
+            g_state.sensor.proj_warmup_timer_ms = millis() + 80000;
             g_state.sensor.proj_retry_count = 0;
             g_state.sensor.proj_hardware_failed = false;
         }
@@ -2723,7 +2723,7 @@ static void rs485_handle_projector_verification() {
             
             if (g_state.sensor.proj_verif_state == 1) {
                 g_state.sensor.proj_verif_state = 3; // RETRYING
-                g_state.sensor.proj_warmup_timer_ms = millis() + 8000;
+                g_state.sensor.proj_warmup_timer_ms = millis() + 80000;
                 g_state.sensor.proj_retry_count = 1;
                 g_state.ui_needs_update = true;
 

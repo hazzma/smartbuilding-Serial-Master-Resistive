@@ -263,6 +263,8 @@ struct SensorData {
     bool     sched_retry_pending;           // true if a session start was missed and needs retry
     uint32_t sched_retry_check_ms;          // when to retry the missed turn-on
     uint8_t  sched_retry_session;           // which session needs retry
+    uint8_t  sched_pre_start_triggered_mask; // bitmask of sessions where pre-start has triggered today
+    uint8_t  sched_start_triggered_mask;     // bitmask of sessions where start has triggered today
 
     // Legacy fields (kept for NVS backward compat only, not used in logic)
     uint32_t schedule_date_yyyymmdd;

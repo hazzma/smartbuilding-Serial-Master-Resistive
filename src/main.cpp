@@ -370,6 +370,8 @@ void Task_Net(void* pvParameters) {
                         g_state.sensor.sched_retry_pending = false;
                         g_state.sensor.sched_retry_check_ms = 0;
                         g_state.sensor.sched_retry_session = 0;
+                        g_state.sensor.sched_pre_start_triggered_mask = 0;
+                        g_state.sensor.sched_start_triggered_mask = 0;
                         Serial.printf("[Schedule] Midnight refresh: today=%s bitmask=%02X sessions=%u\n",
                                       schedule_get_day_name(today_idx),
                                       g_state.sensor.sched_today_sessions_bitmask,
@@ -438,18 +440,18 @@ void Task_Net(void* pvParameters) {
 
                         // Check if we're in pre-class window AND haven't triggered yet
                         if (minute_now >= pre_start && minute_now < start) {
-                            // Only trigger if we haven't triggered this "minute" yet
-                            if (g_state.sensor.sched_last_triggered_min != minute_now) {
-                                // Check if AC/light are OFF (someone turned them off)
-                                bool was_manually_off = !g_state.sensor.ac_on && !g_state.sensor.light_on;
+                            if (!(g_state.sensor.sched_pre_start_triggered_mask & (1 << s))) {
+                                g_state.sensor.sched_pre_start_triggered_mask |= (1 << s);
 
+                                // Turn on AC to 23 degrees and lights
+                                g_state.sensor.temp_target = 23.0f;
                                 g_state.sensor.ac_on = true;
                                 g_state.sensor.light_on = true;
                                 g_state.sensor.sched_shutdown_active = false;
                                 g_state.sensor.sched_shutdown_timer_ms = 0;
-                                g_state.sensor.sched_last_triggered_min = minute_now;
                                 g_state.sensor.sched_retry_pending = false;
                                 g_state.sensor.sched_retry_check_ms = 0;
+                                g_state.sensor.sched_retry_session = 0;
                                 g_state.ui_needs_update = true;
                                 trigger_schedule_ac_on = true;
                                 trigger_schedule_light_on = true;
@@ -458,46 +460,31 @@ void Task_Net(void* pvParameters) {
                                 fan_speed = g_state.sensor.ac_fan_speed;
                                 swing_mode = g_state.sensor.ac_swing_mode;
 
-                                if (was_manually_off) {
-                                    uint8_t sh, sm, eh, em;
-                                    schedule_get_session_time(s, sh, sm, eh, em);
-                                    Serial.printf("[Schedule] RECOVERY: Session S%u pre-start (%02u:%02u) - turning back ON (was manually off)\n",
-                                                  s + 1, sh, sm);
-                                } else {
-                                    uint8_t sh, sm, eh, em;
-                                    schedule_get_session_time(s, sh, sm, eh, em);
-                                    Serial.printf("[Schedule] Pre-class trigger S%u (%02u:%02u - %02u:%02u)\n",
-                                                  s + 1, sh, sm, eh, em);
-                                }
+                                uint8_t sh, sm, eh, em;
+                                schedule_get_session_time(s, sh, sm, eh, em);
+                                Serial.printf("[Schedule] Pre-class trigger S%u (%02u:%02u - %02u:%02u) - AC set to 23.0C\n",
+                                              s + 1, sh, sm, eh, em);
                             }
                         }
 
-                        // Session start check (missed pre-trigger recovery)
-                        // If we're PAST the start but still within class (and we missed pre-trigger cleanup)
+                        // Session start check: enforce AC/light ON exactly at start time (or if missed)
                         if (minute_now >= start && minute_now < end) {
-                            // Check if someone manually turned things off after pre-trigger
-                            if (g_state.sensor.sched_last_triggered_min < pre_start ||
-                                g_state.sensor.sched_last_triggered_min >= end) {
-                                // We're in a session without having triggered pre-class
-                                // Try to turn on (but don't spam every second)
-                                if (g_state.sensor.sched_last_triggered_min != minute_now) {
-                                    if (!g_state.sensor.ac_on || !g_state.sensor.light_on) {
-                                        Serial.printf("[Schedule] Session S%u in progress but AC/light off - turning ON\n", s + 1);
-                                        g_state.sensor.ac_on = true;
-                                        g_state.sensor.light_on = true;
-                                        g_state.sensor.sched_shutdown_active = false;
-                                        g_state.sensor.sched_shutdown_timer_ms = 0;
-                                        g_state.sensor.sched_last_triggered_min = minute_now;
-                                        g_state.ui_needs_update = true;
-                                        trigger_schedule_ac_on = true;
-                                        trigger_schedule_light_on = true;
-                                        trigger_schedule_publish = true;
-                                        target_temp = g_state.sensor.temp_target;
-                                        fan_speed = g_state.sensor.ac_fan_speed;
-                                        swing_mode = g_state.sensor.ac_swing_mode;
-                                    } else {
-                                        g_state.sensor.sched_last_triggered_min = minute_now;
-                                    }
+                            if (!(g_state.sensor.sched_start_triggered_mask & (1 << s))) {
+                                g_state.sensor.sched_start_triggered_mask |= (1 << s);
+
+                                if (!g_state.sensor.ac_on || !g_state.sensor.light_on) {
+                                    Serial.printf("[Schedule] Session S%u started - enforcing AC/light ON\n", s + 1);
+                                    g_state.sensor.ac_on = true;
+                                    g_state.sensor.light_on = true;
+                                    g_state.sensor.sched_shutdown_active = false;
+                                    g_state.sensor.sched_shutdown_timer_ms = 0;
+                                    g_state.ui_needs_update = true;
+                                    trigger_schedule_ac_on = true;
+                                    trigger_schedule_light_on = true;
+                                    trigger_schedule_publish = true;
+                                    target_temp = g_state.sensor.temp_target;
+                                    fan_speed = g_state.sensor.ac_fan_speed;
+                                    swing_mode = g_state.sensor.ac_swing_mode;
                                 }
                             }
                         }

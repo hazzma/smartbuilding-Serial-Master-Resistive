@@ -188,6 +188,8 @@ void data_load_dummy(BuildingState& state) {
         state.sensor.sched_retry_pending = false;
         state.sensor.sched_retry_check_ms = 0;
         state.sensor.sched_retry_session = 0;
+        state.sensor.sched_pre_start_triggered_mask = 0;
+        state.sensor.sched_start_triggered_mask = 0;
         state.sensor.schedule_date_yyyymmdd = 0;
         state.sensor.schedule_slot_count = 0;
         memset(state.sensor.schedule_slots, 0, sizeof(state.sensor.schedule_slots));
