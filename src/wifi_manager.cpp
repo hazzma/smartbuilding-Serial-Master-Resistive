@@ -195,9 +195,9 @@ static void wifi_scan_prepare_start() {
     Serial.println("[SCAN] Disconnecting MQTT and WiFi for scan");
     mqtt_request_reconnect();
     WiFi.setAutoReconnect(false);
-    WiFi.disconnect(true, false); // Turn off WiFi completely to force drop
-    delay(100);                   // Give radio time to power down
-    WiFi.mode(WIFI_STA);          // Bring it back up in Station mode
+    WiFi.disconnect(false, false); // Disconnect only — do NOT power off radio (wifioff=true kills RF driver,
+                                   // causing scanNetworks() to return -2 FAILED before it has time to settle)
+    WiFi.mode(WIFI_STA);          // Ensure STA mode
     WiFi.setAutoReconnect(false); // Prevent automatic reconnect triggered by mode change
 
     WiFi.scanDelete();

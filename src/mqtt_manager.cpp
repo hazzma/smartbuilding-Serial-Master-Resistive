@@ -724,8 +724,10 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
     if (strcmp(topic, topic_led) == 0) {
         bool scalar_on = false;
         if (mqtt_parse_bool_payload(payload, length, scalar_on)) {
-            if (occupied) {
-                Serial.println("[MQTT] LED command ignored by occupancy safety");
+            // Only block OFF when room is occupied. ON is always allowed
+            // (e.g. master turned off manually, then remote wants to turn back ON).
+            if (occupied && !scalar_on) {
+                Serial.println("[MQTT] LED OFF command ignored - room occupied");
                 return;
             }
             data_lock(g_state);
@@ -766,9 +768,10 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
             }
             changed = true;
         }
-        if (changed && occupied) {
+        // Only block OFF when occupied; ON commands always allowed.
+        if (changed && occupied && !desired_on) {
             changed = false;
-            Serial.println("[MQTT] LED JSON command ignored by occupancy safety");
+            Serial.println("[MQTT] LED OFF JSON command ignored - room occupied");
         }
         if (changed) {
             g_state.sensor.app_controlled_light = desired_on;
