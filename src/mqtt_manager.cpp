@@ -497,7 +497,9 @@ static void mqtt_publish_v2_state(uint16_t flags) {
     bool co2_error = !g_state.rs485.dashboard.co2_valid;
     bool lux_error = !g_state.rs485.dashboard.lux_valid;
     bool human_error = !g_state.rs485.dashboard.human_presence_valid;
-    bool led_error = g_state.rs485.light_command_failed || (!g_state.rs485.bus_ok && light_id > 1);
+    bool led_error = g_state.sensor.led_check_warning ||
+                     g_state.rs485.light_command_failed ||
+                     (!g_state.rs485.bus_ok && light_id > 1);
     bool projector_error = g_state.sensor.proj_hardware_failed || (!g_state.rs485.bus_ok && g_state.rs485.dashboard.projector_available);
     bool ac_error = g_state.sensor.ac_performance_warning || (!g_state.rs485.bus_ok && g_state.rs485.dashboard.ac_available);
 
@@ -617,12 +619,12 @@ static bool mqtt_parse_weekly_schedule(char* payload_str) {
                 return false;
             }
         }
-        // Parse right-to-left (LSB on the right)
+        // Parse aligning the rightmost character to Session 6 (bit 5) to support missing leading zeros
         uint8_t mask = 0;
-        for (uint8_t i = 0; i < SCHEDULE_SESSION_COUNT; i++) {
-            if (i < tlen) {
-                if (token[tlen - 1 - i] == '1') {
-                    mask |= (1 << i);
+        for (uint8_t k = 0; k < SCHEDULE_SESSION_COUNT; k++) {
+            if (k < tlen) {
+                if (token[tlen - 1 - k] == '1') {
+                    mask |= (1 << (5 - k));
                 }
             }
         }
@@ -911,6 +913,15 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
         while (*start && isspace((unsigned char)*start)) start++;
         char* end = start + strlen(start);
         while (end > start && isspace((unsigned char)end[-1])) *--end = '\0';
+
+        // Save raw schedule payload and update received status
+        data_lock(g_state);
+        strncpy(g_state.sensor.last_mqtt_sched_payload, start, sizeof(g_state.sensor.last_mqtt_sched_payload) - 1);
+        g_state.sensor.last_mqtt_sched_payload[sizeof(g_state.sensor.last_mqtt_sched_payload) - 1] = '\0';
+        g_state.sensor.mqtt_sched_received_today = true;
+        g_state.ui_needs_update = true;
+        data_unlock(g_state);
+        data_save_device_config(g_state);
 
         // Try new format first (bitmask)
         if (mqtt_parse_weekly_schedule(start)) {

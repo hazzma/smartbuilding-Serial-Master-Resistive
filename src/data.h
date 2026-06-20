@@ -282,6 +282,22 @@ struct SensorData {
     bool     app_controlled_ac;
     bool     app_controlled_light;
     bool     app_controlled_projector;
+
+    // Auto-off 5-minute countdown (runs when room empty, no class)
+    bool     auto_off_pending;
+    uint32_t auto_off_countdown_ms;
+
+    // LED lux check (50lx delta after light on within 2 minutes)
+    bool     led_check_warning;
+    uint32_t led_check_start_ms;
+    float    led_check_baseline_lux;
+
+    // AC fan escalation (auto max fan after 10 min no temp change)
+    bool     ac_fan_escalated;
+
+    // Diagnostic MQTT Schedule tracking
+    char     last_mqtt_sched_payload[64];
+    bool     mqtt_sched_received_today;
 };
 
 struct NetworkState {

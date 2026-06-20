@@ -22,6 +22,7 @@ static bool show_password  = false;
 static bool dashboard_env_panel = false;
 static bool dashboard_dragging = false;
 static bool dashboard_moved = false;
+static int  dashboard_drag_start_x = 0;
 static int  dashboard_drag_start_y = 0;
 static char temp_lan_ip[16] = "192.168.1.177";
 static char temp_lan_gw[16] = "192.168.1.1";
@@ -515,9 +516,101 @@ void render_dashboard_legacy(BuildingState& state, int fps) {
     p_canvas->setTextDatum(TextDatum::TopLeft);
 }
 
+void render_schedule_status_page(BuildingState& state) {
+    p_canvas->fillScreen(COLOR_BG_MAIN);
+
+    p_canvas->setTextDatum(TextDatum::TopLeft);
+    p_canvas->setTextColor(COLOR_TEXT_MAIN);
+    p_canvas->setTextFont(4);
+    p_canvas->drawString("Schedule & MQTT", 20, 10);
+    p_canvas->drawFastHLine(0, 46, 480, COLOR_ACCENT_MAIN);
+
+    // BACK button
+    drawCardBase(372, 8, 90, 34, COLOR_STAT_OFF);
+    p_canvas->setTextDatum(TextDatum::MiddleCenter);
+    p_canvas->setTextFont(2);
+    p_canvas->setTextColor(COLOR_TEXT_MAIN);
+    p_canvas->drawString("BACK", 417, 25);
+
+    // Main status card
+    drawCardBase(20, 60, 440, 234, COLOR_CARD_BG);
+
+    // 1. MQTT Schedule Status
+    p_canvas->setTextDatum(TextDatum::MiddleLeft);
+    p_canvas->setTextFont(2);
+    p_canvas->setTextColor(COLOR_TEXT_SEC);
+    p_canvas->drawString("Schedule Status:", 36, 80);
+
+    if (state.sensor.mqtt_sched_received_today) {
+        p_canvas->setTextColor(COLOR_STAT_ON);
+        p_canvas->drawString("Received Today", 180, 80);
+    } else {
+        p_canvas->setTextColor(COLOR_STAT_WARN);
+        p_canvas->drawString("Not Received Yet", 180, 80);
+    }
+
+    // 2. Active Sessions Today
+    p_canvas->setTextColor(COLOR_TEXT_SEC);
+    p_canvas->drawString("Active Sessions:", 36, 110);
+
+    uint8_t today_bitmask = state.sensor.sched_today_sessions_bitmask;
+    
+    // Draw columns for S1-S6
+    for (int s = 0; s < 6; s++) {
+        int col = s / 3; // 0 or 1
+        int row = s % 3; // 0, 1, or 2
+        int sx = 36 + col * 200;
+        int sy = 140 + row * 26;
+        
+        bool active = (today_bitmask & (1 << s)) != 0;
+        uint16_t color = active ? COLOR_STAT_ON : COLOR_STAT_OFF;
+        
+        p_canvas->fillCircle(sx + 6, sy + 8, 4, color);
+        
+        p_canvas->setTextColor(active ? COLOR_TEXT_MAIN : COLOR_TEXT_SEC);
+        char session_lbl[32];
+        uint8_t sh, sm, eh, em;
+        schedule_get_session_time(s, sh, sm, eh, em);
+        snprintf(session_lbl, sizeof(session_lbl), "S%d (%02d:%02d-%02d:%02d)", s + 1, sh, sm, eh, em);
+        p_canvas->drawString(session_lbl, sx + 18, sy + 8);
+    }
+
+    // 3. Raw MQTT Payload
+    p_canvas->setTextColor(COLOR_TEXT_SEC);
+    p_canvas->drawString("Raw MQTT Payload:", 36, 230);
+    
+    p_canvas->setTextColor(COLOR_ACCENT_MAIN);
+    if (strlen(state.sensor.last_mqtt_sched_payload) > 0) {
+        p_canvas->drawString(state.sensor.last_mqtt_sched_payload, 36, 256);
+    } else {
+        p_canvas->setTextColor(COLOR_TEXT_SEC);
+        p_canvas->drawString("-", 36, 256);
+    }
+
+    // Draw page indicator dots at the bottom
+    p_canvas->fillCircle(230, 308, 5, COLOR_CARD_BG);
+    p_canvas->fillCircle(250, 308, 5, COLOR_ACCENT_MAIN);
+    p_canvas->setTextDatum(TextDatum::TopLeft);
+}
+
+void handle_schedule_status_touch(BuildingState& state, int tx, int ty) {
+    // BACK button: 372, 8, 90, 34
+    if (isHit(tx, ty, 372, 8, 90, 34)) {
+        data_lock(state);
+        state.dashboard_page = 0;
+        state.ui_needs_update = true;
+        data_unlock(state);
+    }
+}
+
 void render_dashboard(BuildingState& state, int fps) {
     (void)fps;
     drawWallpaperBackground();
+
+    if (state.dashboard_page == 1) {
+        render_schedule_status_page(state);
+        return;
+    }
 
     DashboardUiModel model = dashboard_make_ui_model(state);
     bool empty_hero = model.layout == DASH_LAYOUT_STATUS_EMPTY;
@@ -618,6 +711,10 @@ void render_dashboard(BuildingState& state, int fps) {
 
     if (dashboard_env_panel) {
         render_dashboard_environment_panel(state);
+    } else {
+        // Page indicator dots at the bottom
+        p_canvas->fillCircle(230, 308, 5, COLOR_ACCENT_MAIN);
+        p_canvas->fillCircle(250, 308, 5, COLOR_CARD_BG);
     }
 }
 
@@ -2725,6 +2822,7 @@ void handle_dashboard_touch_event(BuildingState& state, int tx, int ty, TouchEve
     if (event == TOUCH_EVENT_DOWN) {
         dashboard_dragging = true;
         dashboard_moved = false;
+        dashboard_drag_start_x = tx;
         dashboard_drag_start_y = ty;
 
         if (dashboard_env_panel && hit_rect(tx, ty, dashboard_env_close_rect())) {
@@ -2738,13 +2836,34 @@ void handle_dashboard_touch_event(BuildingState& state, int tx, int ty, TouchEve
     }
 
     if (event == TOUCH_EVENT_MOVE && dashboard_dragging) {
-        if (abs(ty - dashboard_drag_start_y) > 14) dashboard_moved = true;
+        if (abs(tx - dashboard_drag_start_x) > 14 || abs(ty - dashboard_drag_start_y) > 14) dashboard_moved = true;
         return;
     }
 
     if (event == TOUCH_EVENT_UP && dashboard_dragging) {
+        int dx = tx - dashboard_drag_start_x;
         int dy = ty - dashboard_drag_start_y;
         dashboard_dragging = false;
+
+        // Horizontal swipes take priority when the environment panel is closed
+        if (!dashboard_env_panel) {
+            if (dx < -50) {
+                // Swipe Left -> go to Page 1
+                data_lock(state);
+                state.dashboard_page = 1;
+                state.ui_needs_update = true;
+                data_unlock(state);
+                return;
+            }
+            if (dx > 50) {
+                // Swipe Right -> go to Page 0
+                data_lock(state);
+                state.dashboard_page = 0;
+                state.ui_needs_update = true;
+                data_unlock(state);
+                return;
+            }
+        }
 
         if (dy < -44) {
             dashboard_env_panel = true;
@@ -2763,7 +2882,11 @@ void handle_dashboard_touch_event(BuildingState& state, int tx, int ty, TouchEve
         }
 
         if (!dashboard_moved && !dashboard_env_panel) {
-            handle_dashboard_touch(state, tx, ty);
+            if (state.dashboard_page == 0) {
+                handle_dashboard_touch(state, tx, ty);
+            } else if (state.dashboard_page == 1) {
+                handle_schedule_status_touch(state, tx, ty);
+            }
         }
     }
 }

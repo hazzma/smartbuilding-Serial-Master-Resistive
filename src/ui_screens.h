@@ -41,6 +41,7 @@ void screens_render(BuildingState& state, int fps);
 void screens_set(ScreenState s);
 void screens_handle_touch(BuildingState& state, int tx, int ty);
 void screens_handle_touch_event(BuildingState& state, int tx, int ty, TouchEventType event);
+void handle_schedule_status_touch(BuildingState& state, int tx, int ty);
 bool screens_has_animation();
 
 #endif

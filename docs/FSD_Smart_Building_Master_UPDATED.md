@@ -100,9 +100,9 @@ What changed:
 - Schedule input SHALL be server-owned and UI-less on the master. The master
   SHALL always listen to `HD01/control/schedule`.
 - `HD01/control/schedule` SHALL support a weekly schedule payload or today-only schedule payload using a binary bitmask representing sessions S1 to S6.
-  - To support cases where payloads are sent or stored as integers and leading zeros are dropped, the parsing is performed from right to left (LSB on the right), mapping the rightmost character to session S1 (Bit 0), the second rightmost to session S2 (Bit 1), etc. Leading zeros are optional.
-  - Single day format: e.g., `"10011"` (equivalent to `"010011"`, enabling sessions S2, S5, and S6 for today), `"1"` (equivalent to `"000001"`, enabling S1), `"10"` (equivalent to `"000010"`, enabling S2).
-  - Weekly format: daily masks separated by semicolons for Monday to Sunday, e.g., `"10011;111000;0;0;0;0;0"`.
+  - To support cases where payloads are sent or stored as integers and leading zeros are dropped, the parsing is performed by aligning the rightmost character of the payload string with Session 6 (Bit 5 / `1 << 5`), mapping characters from right to left to Session 6 (Bit 5), Session 5 (Bit 4), etc. Leading zeros are optional.
+  - Single day format: e.g., `"100000"` (enables Session 1 / Bit 0), `"10"` (equivalent to `"000010"`, enabling Session 5 / Bit 4), `"1"` (equivalent to `"000001"`, enabling Session 6 / Bit 5).
+  - Weekly format: daily masks separated by semicolons for Monday to Sunday, e.g., `"100110;111000;0;0;0;0;0"`.
   A valid payload SHALL replace the previous stored schedule, re-cache active sessions for today, and reset trigger states.
 - The existing `PRE_CLASS_ON` and `CLASS_ENDED` schedule commands SHALL remain
   supported as fallback/manual event commands.
@@ -553,10 +553,14 @@ Transition diagram:
 
 **Key implementation rules:**
 
-- `WiFi.setAutoReconnect(false)` is set at init and NEVER changed. The state
-  machine exclusively owns reconnect logic.
+- `WiFi.setAutoReconnect(false)` is set at init and scan restore, ensuring the master 
+  exclusively controls reconnection attempts.
+- Reconnection Attempts: If the initial connection or reconnection (due to dropped WiFi) is 
+  triggered, the WiFi manager attempts to connect for up to 15 seconds per try, retrying up to 
+  a maximum of **3 times**. If all 3 attempts fail, the connection is abandoned and marked as 
+  `FAILED: Max retries reached`. The retry count resets on success.
 - On entry to `SCAN_PREPARE`: `WiFi.setAutoReconnect(false)` + `WiFi.disconnect(false,false)`
-  are called unconditionally, regardless of current state.
+  are called unconditionally. Reconnection checks and attempts are paused during the active scan.
 - `wifi_restore_after_scan` is set to `true` only when scan is triggered from
   `CONNECTING` or `CONNECTED` and there are saved credentials.
 - MQTT is signaled via `mqtt_request_reconnect()` when scan preempts a live connection.
@@ -1368,7 +1372,7 @@ runtime template `<class_name>/control/<command_type>`.
 | `HD01/control/led` | Integer command | Forward LED command to target slave, wait for confirmation, publish LED integer state. |
 | `HD01/control/ac` | `PPTTFFSS` command | Forward AC command to target slave, wait for confirmation, publish latest AC state. |
 | `HD01/control/projector` | Integer command | Forward projector command to target slave, wait for confirmation, publish latest projector integer state. |
-| `HD01/control/schedule` | Event or weekly/daily bitmask schedule command | Accepts `PRE_CLASS_ON`, `CLASS_ENDED`, a today-only bitmask (parsed right-to-left, e.g., `"1"`, `"10"`, `"10011"`), or a full weekly bitmask schedule (separated by semicolons for Mon-Sun, e.g., `"10011;111000;0;0;0;0;0"`). |
+| `HD01/control/schedule` | Event or weekly/daily bitmask schedule command | Accepts `PRE_CLASS_ON`, `CLASS_ENDED`, a today-only bitmask (right-aligned to Session 6, e.g., `"1"` for Session 6, `"10"` for Session 5, `"100000"` for Session 1), or a full weekly bitmask schedule (separated by semicolons for Mon-Sun, e.g., `"100110;111000;0;0;0;0;0"`). |
 
 What changed: command handling is topic-based and confirmation-based.
 

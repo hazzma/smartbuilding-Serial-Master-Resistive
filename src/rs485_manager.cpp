@@ -2,6 +2,7 @@
 #include "data.h"
 #include "mapping_manager.h"
 #include "ui_screens.h"
+#include "mqtt_manager.h"
 
 #include <DFRobot_RTU.h>
 #include <string.h>
@@ -2683,6 +2684,9 @@ static void rs485_handle_projector_verification() {
         g_state.sensor.proj_warning_until_ms = 0;
         g_state.ui_needs_update = true;
         Serial.println("[Projector] Warning timeout. Verification failed, turning OFF.");
+        data_unlock(g_state);
+        mqtt_publish_state();  // Notify app projector is now OFF
+        data_lock(g_state);
     }
 
     if (g_state.sensor.proj_verif_state == 1 || g_state.sensor.proj_verif_state == 3) {
@@ -2740,6 +2744,9 @@ static void rs485_handle_projector_verification() {
                 g_state.ui_needs_update = true;
 
                 Serial.println("[Projector] Verification failed after retry. Keeping ON with CHECK_PROJECTOR warning.");
+                data_unlock(g_state);
+                mqtt_publish_state();  // Notify app of hardware-failed warning
+                data_lock(g_state);
             }
         }
     }

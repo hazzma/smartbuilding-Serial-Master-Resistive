@@ -224,6 +224,42 @@ memory or requiring cloud calculations.
 
 ---
 
+## 4.5. Summary of Completed V2.8 Enhancements
+
+Berikut adalah detail desain logis dari fitur-fitur baru yang telah aktif di implementasi V2.8:
+
+1. **Auto-Off Timer 5 Menit (Occupancy Safety)**:
+   - Apabila ruangan terdeteksi kosong (`human_presence == false` dan valid) serta tidak ada jadwal kelas yang sedang aktif, sistem memulai hitungan mundur 5 menit (`auto_off_countdown_ms = 5 * 60 * 1000`).
+   - Jika hitungan mundur habis, AC, lampu (Relay 1 & 2), dan projector otomatis dimatikan.
+   - Apabila ada orang masuk (presensi menjadi `true`) atau jadwal kelas menjadi aktif sebelum timer habis, hitungan mundur langsung dibatalkan dan di-reset.
+   - **Remote Control Override Window:** Jika AC/Lampu dinyalakan secara manual lewat MQTT saat ruangan kosong, sistem tetap mengizinkan perangkat menyala selama 5 menit sebelum timer mati otomatis mengambil alih kembali (memberikan waktu tunggu agar tidak langsung mati seketika).
+
+2. **LED Lux Change Verification**:
+   - Saat lampu dinyalakan, sistem mencatat baseline lux ruangan (`led_check_baseline_lux`).
+   - Apabila dalam waktu 2 menit Lux ruangan tidak bertambah minimal `50 lx`, sistem menganggap ada kegagalan LED (misalnya lampu putus atau sensor terhalang).
+   - Indikasi kegagalan: memicu peringatan `"Check LED"` pada HMI lokal dan menyalakan flag `led_check_warning` yang digabungkan ke dalam bit alert `led_error` (Alert Bit 4) di MQTT.
+
+3. **AC Cooling-Performance Monitor & Fan Speed Escalation**:
+   - Berjalan ketika AC menyala (`ac_on == true`), sensor suhu valid, dan suhu ruangan saat awal pemantauan minimal `2.0°C` di atas target.
+   - Pemantauan dilakukan dalam jendela bergulir **10 menit**. Suhu awal disimpan di `ac_performance_start_temp_c`.
+   - **Warning Performa:** Jika suhu turun kurang dari `1.0°C` dalam 10 menit, warning AC menyala (`ac_performance_warning = true`) dan Alert Bit 6 (`64`) dipublish ke MQTT.
+   - **Eskalasi Fan Speed:** Jika suhu turun kurang dari `0.1°C` ("tidak ada perubahan sama sekali") dalam 10 menit, sistem secara otomatis memaksa fan AC ke kecepatan maksimal (**Max Fan Speed / 3**) via RS485 untuk mempercepat pendinginan.
+   - Warning dan monitor di-reset bersih seketika apabila AC dimatikan, target suhu diubah oleh user/server (selisih `>= 0.5°C`), atau sensor suhu menjadi invalid.
+
+4. **Schedule Binary Parsing Right-Aligned (LSB Left)**:
+   - Parser bitmask jadwal mingguan (`HD01/control/schedule`) diselaraskan ke arah kanan (rightmost-aligned) di mana karakter paling kanan selalu dihubungkan dengan Sesi 6 (Bit 5 / `1 << 5`), dan berjalan ke kiri.
+   - Ini secara tuntas memecahkan bug hilangnya leading zero saat payload dikirim dalam format integer oleh server/app (misalnya payload `"10"` didekode sebagai `"000010"` = Sesi 5 aktif, `"1"` didekode sebagai `"000001"` = Sesi 6 aktif, `"100000"` = Sesi 1 aktif).
+
+ 5. **WiFi Manager & Manual Reconnect (3x Retries)**:
+    - Manajemen WiFi menggunakan kontrol manual (`WiFi.setAutoReconnect(false)`). Setiap kali koneksi gagal atau terputus, sistem akan mengulangi penyambungan hingga maksimal **3 kali percobaan** (timeout 15 detik per percobaan).
+    - Jika gagal 3 kali, status diset ke `FAILED: Max retries reached` dan koneksi dihentikan.
+    - Percobaan koneksi di-pause saat pemindaian WiFi (scan) sedang berlangsung untuk mencegah crash/collision pada driver. Setelah scan selesai, koneksi otomatis dipulihkan kembali ke NVS SSID.
+
+6. **Projector Fail Status Realignment**:
+   - Jika verifikasi Lux projector gagal setelah 1x retry, state projector internal dipaksa kembali ke OFF, dan status `0` dikirim ulang ke MQTT topic `HD01/data/projector` agar state pada server selalu sinkron dengan kenyataan fisik.
+
+---
+
 ## 5. Documentation Impact Analysis
 
 The following files require updates to integrate these new features:

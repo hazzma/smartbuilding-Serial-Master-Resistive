@@ -17,10 +17,15 @@
 #define ENABLE_DUMMY_RS485_SLAVE 0
 
 static const uint64_t DUMMY_RS485_MAC = 0xD00D00000123ULL;
-static const uint32_t AC_PERFORMANCE_WINDOW_MS = 30UL * 60UL * 1000UL;
-static const float AC_PERFORMANCE_MIN_START_GAP_C = 2.0f;
-static const float AC_PERFORMANCE_MIN_DROP_C = 0.5f;
-static const float AC_PERFORMANCE_TARGET_RESET_DELTA_C = 0.5f;
+static const uint32_t AC_PERFORMANCE_WINDOW_MS          = 10UL * 60UL * 1000UL; // 10 min
+static const float    AC_PERFORMANCE_MIN_START_GAP_C      = 2.0f;
+static const float    AC_PERFORMANCE_MIN_DROP_C           = 1.0f;   // 1°C
+static const float    AC_PERFORMANCE_ESCALATE_THRESHOLD_C = 0.1f;   // "no change" threshold
+static const float    AC_PERFORMANCE_TARGET_RESET_DELTA_C = 0.5f;
+static const uint32_t AUTO_OFF_DELAY_MS                   = 5UL * 60UL * 1000UL; // 5 min
+static const uint32_t LED_CHECK_WINDOW_MS                 = 2UL * 60UL * 1000UL; // 2 min
+static const float    LED_CHECK_MIN_DELTA_LUX             = 50.0f;
+static const uint8_t  PRECLASS_FAN_SPEED                  = 1;  // Low
 
 static bool dashboard_average_temp_locked(const BuildingState& state, float& average_c) {
     float sum = 0.0f;
@@ -35,7 +40,8 @@ static bool dashboard_average_temp_locked(const BuildingState& state, float& ave
     return true;
 }
 
-static bool update_ac_performance_monitor_locked(BuildingState& state, uint32_t now) {
+// Returns: bit0 = warning_changed, bit1 = fan_escalation_triggered
+static uint8_t update_ac_performance_monitor_locked(BuildingState& state, uint32_t now) {
     float room_temp_c = -100.0f;
     bool temp_valid = dashboard_average_temp_locked(state, room_temp_c);
     bool ac_available = state.rs485.dashboard.ac_available;
@@ -46,13 +52,28 @@ static bool update_ac_performance_monitor_locked(BuildingState& state, uint32_t 
         AC_PERFORMANCE_TARGET_RESET_DELTA_C;
     bool warning_before = state.sensor.ac_performance_warning;
 
-    if (!should_monitor || target_changed) {
+    // If AC is OFF — reset monitor and clear warning
+    if (!state.sensor.ac_on) {
         state.sensor.ac_performance_monitor_active = false;
         state.sensor.ac_performance_started_ms = 0;
         state.sensor.ac_performance_start_temp_c = -100.0f;
         state.sensor.ac_performance_target_c = state.sensor.temp_target;
         state.sensor.ac_performance_warning = false;
-        return warning_before != state.sensor.ac_performance_warning;
+        state.sensor.ac_fan_escalated = false;
+        return (warning_before != state.sensor.ac_performance_warning) ? 1 : 0;
+    }
+
+    if (!should_monitor || target_changed) {
+        // Conditions not met (AC too close to target, or target changed) — reset window but keep warning
+        state.sensor.ac_performance_monitor_active = false;
+        state.sensor.ac_performance_started_ms = 0;
+        state.sensor.ac_performance_start_temp_c = -100.0f;
+        state.sensor.ac_performance_target_c = state.sensor.temp_target;
+        if (target_changed) {
+            state.sensor.ac_performance_warning = false;
+            state.sensor.ac_fan_escalated = false;
+        }
+        return (warning_before != state.sensor.ac_performance_warning) ? 1 : 0;
     }
 
     if (!state.sensor.ac_performance_monitor_active) {
@@ -60,26 +81,37 @@ static bool update_ac_performance_monitor_locked(BuildingState& state, uint32_t 
         state.sensor.ac_performance_started_ms = now;
         state.sensor.ac_performance_start_temp_c = room_temp_c;
         state.sensor.ac_performance_target_c = state.sensor.temp_target;
-        Serial.printf("[AC Monitor] Started room=%.1fC target=%.1fC window=30min\n",
+        Serial.printf("[AC Monitor] Started room=%.1fC target=%.1fC window=10min\n",
                       room_temp_c, state.sensor.temp_target);
-        return warning_before != state.sensor.ac_performance_warning;
+        return 0;
     }
 
     if (now - state.sensor.ac_performance_started_ms >= AC_PERFORMANCE_WINDOW_MS) {
         float drop_c = state.sensor.ac_performance_start_temp_c - room_temp_c;
-        state.sensor.ac_performance_warning = drop_c < AC_PERFORMANCE_MIN_DROP_C;
+        state.sensor.ac_performance_warning = (drop_c < AC_PERFORMANCE_MIN_DROP_C);
         Serial.printf("[AC Monitor] Window done start=%.1fC now=%.1fC drop=%.1fC warning=%s\n",
                       state.sensor.ac_performance_start_temp_c,
                       room_temp_c,
                       drop_c,
                       state.sensor.ac_performance_warning ? "YES" : "NO");
 
-        // Start a fresh rolling window while cooling is still expected.
+        uint8_t result = (warning_before != state.sensor.ac_performance_warning) ? 1 : 0;
+
+        // Fan escalation: if no change at all (<0.1°C), escalate to max fan speed
+        if (drop_c < AC_PERFORMANCE_ESCALATE_THRESHOLD_C && !state.sensor.ac_fan_escalated) {
+            state.sensor.ac_fan_speed = 3;  // Max fan speed
+            state.sensor.ac_fan_escalated = true;
+            result |= 2;  // signal caller to send RS485 + publish
+            Serial.println("[AC Monitor] No temp change at all — fan escalated to MAX");
+        }
+
+        // Restart rolling window (warning persists until AC off)
         state.sensor.ac_performance_started_ms = now;
         state.sensor.ac_performance_start_temp_c = room_temp_c;
+        return result;
     }
 
-    return warning_before != state.sensor.ac_performance_warning;
+    return 0;
 }
 
 static void apply_dummy_rs485_slave(bool enabled) {
@@ -303,6 +335,8 @@ void Task_Net(void* pvParameters) {
             bool trigger_auto_off_ac = false;
             bool trigger_auto_off_light = false;
             bool trigger_auto_off_projector = false;
+            bool trigger_fan_escalation = false;
+            bool trigger_led_warning_changed = false;
             float target_temp = 23.0f;
             uint8_t fan_speed = 0;
             uint8_t swing_mode = 0;
@@ -319,8 +353,10 @@ void Task_Net(void* pvParameters) {
                 g_state.sensor.active_load_accum_sec_today++;
             }
 
-            ac_performance_warning_changed = update_ac_performance_monitor_locked(g_state, now);
-            if (ac_performance_warning_changed) {
+            uint8_t ac_monitor_result = update_ac_performance_monitor_locked(g_state, now);
+            ac_performance_warning_changed = (ac_monitor_result & 1) != 0;
+            trigger_fan_escalation = (ac_monitor_result & 2) != 0;
+            if (ac_performance_warning_changed || trigger_fan_escalation) {
                 g_state.ui_needs_update = true;
             }
 
@@ -349,6 +385,7 @@ void Task_Net(void* pvParameters) {
                     g_state.sensor.light_day_count++;
                     g_state.sensor.light_accum_sec_today = 0;
                     g_state.sensor.active_load_accum_sec_today = 0;
+                    g_state.sensor.mqtt_sched_received_today = false;
                     save_needed = true;
                     trigger_schedule_publish = true;
 
@@ -457,12 +494,13 @@ void Task_Net(void* pvParameters) {
                                 trigger_schedule_light_on = true;
                                 trigger_schedule_publish = true;
                                 target_temp = g_state.sensor.temp_target;
-                                fan_speed = g_state.sensor.ac_fan_speed;
+                                fan_speed = PRECLASS_FAN_SPEED;  // Low (1)
+                                g_state.sensor.ac_fan_speed = PRECLASS_FAN_SPEED;
                                 swing_mode = g_state.sensor.ac_swing_mode;
 
                                 uint8_t sh, sm, eh, em;
                                 schedule_get_session_time(s, sh, sm, eh, em);
-                                Serial.printf("[Schedule] Pre-class trigger S%u (%02u:%02u - %02u:%02u) - AC set to 23.0C\n",
+                                Serial.printf("[Schedule] Pre-class trigger S%u (%02u:%02u - %02u:%02u) - AC 23.0C fan=Low\n",
                                               s + 1, sh, sm, eh, em);
                             }
                         }
@@ -616,37 +654,115 @@ void Task_Net(void* pvParameters) {
                     g_state.sensor.light_anomaly_alert = false;
                 }
 
-                // --- AUTO-OFF: When no class & room empty ---
-                // class_schedule_active already set above
+                // --- LED LUX CHECK: Detect dead/missing light tube ---
+                // If light_on transitions false→true, snapshot lux baseline.
+                // After 2 minutes, if lux didn't rise ≥50lx → warning.
+                {
+                    static bool prev_light_on_lux = false;
+                    bool light_now = g_state.sensor.light_on;
+                    if (!prev_light_on_lux && light_now) {
+                        // Light just turned ON — capture baseline
+                        g_state.sensor.led_check_baseline_lux = g_state.rs485.dashboard.lux_valid
+                            ? g_state.rs485.dashboard.lux : -1.0f;
+                        g_state.sensor.led_check_start_ms = millis();
+                        if (g_state.sensor.led_check_warning) {
+                            g_state.sensor.led_check_warning = false;
+                            trigger_led_warning_changed = true;
+                        }
+                        Serial.printf("[LED Check] Light ON — baseline lux=%.1f\n",
+                                      g_state.sensor.led_check_baseline_lux);
+                    } else if (!light_now && g_state.sensor.led_check_warning) {
+                        // Light turned OFF — clear warning
+                        g_state.sensor.led_check_warning = false;
+                        g_state.sensor.led_check_start_ms = 0;
+                        g_state.sensor.led_check_baseline_lux = -1.0f;
+                        trigger_led_warning_changed = true;
+                        g_state.ui_needs_update = true;
+                        Serial.println("[LED Check] Light OFF — warning cleared");
+                    } else if (light_now && !g_state.sensor.led_check_warning &&
+                               g_state.sensor.led_check_start_ms != 0 &&
+                               (millis() - g_state.sensor.led_check_start_ms) >= LED_CHECK_WINDOW_MS) {
+                        // 2-minute window expired — evaluate
+                        if (g_state.rs485.dashboard.lux_valid && g_state.sensor.led_check_baseline_lux >= 0.0f) {
+                            float delta = g_state.rs485.dashboard.lux - g_state.sensor.led_check_baseline_lux;
+                            if (delta < LED_CHECK_MIN_DELTA_LUX) {
+                                g_state.sensor.led_check_warning = true;
+                                trigger_led_warning_changed = true;
+                                g_state.ui_needs_update = true;
+                                Serial.printf("[LED Check] WARNING — lux delta=%.1f < 50lx threshold\n", delta);
+                            } else {
+                                Serial.printf("[LED Check] OK — lux delta=%.1f\n", delta);
+                            }
+                        }
+                        g_state.sensor.led_check_start_ms = 0; // reset so we don't check again this session
+                    }
+                    prev_light_on_lux = light_now;
+                }
 
+                // --- AUTO-OFF 5-MINUTE TIMER: Room empty, no class, no shutdown ---
+                // Applies regardless of HOW device was turned on (App, Touch, Schedule).
                 presence_valid = g_state.rs485.dashboard.human_presence_valid;
                 bool occupied = presence_valid && g_state.sensor.human_presence;
+                bool any_device_on = g_state.sensor.ac_on ||
+                                     g_state.sensor.light_on ||
+                                     g_state.sensor.projector_on;
+                bool auto_off_conditions = !class_schedule_active &&
+                                           !g_state.sensor.sched_shutdown_active &&
+                                           presence_valid && !occupied;
 
-                if (!class_schedule_active && presence_valid && !occupied) {
-                    if (g_state.sensor.ac_on && g_state.sensor.app_controlled_ac) {
-                        g_state.sensor.ac_on = false;
-                        g_state.sensor.app_controlled_ac = false;
+                // Detect newly turned-on device to reset an already-running timer
+                {
+                    static bool prev_ac = false, prev_light = false, prev_proj = false;
+                    bool newly_on = (!prev_ac && g_state.sensor.ac_on) ||
+                                   (!prev_light && g_state.sensor.light_on) ||
+                                   (!prev_proj && g_state.sensor.projector_on);
+                    if (newly_on && g_state.sensor.auto_off_pending && auto_off_conditions) {
+                        g_state.sensor.auto_off_countdown_ms = millis() + AUTO_OFF_DELAY_MS;
                         g_state.ui_needs_update = true;
+                        Serial.println("[Auto-Off] Timer reset — new device activated");
+                    }
+                    prev_ac    = g_state.sensor.ac_on;
+                    prev_light = g_state.sensor.light_on;
+                    prev_proj  = g_state.sensor.projector_on;
+                }
+
+                if (!auto_off_conditions || !any_device_on) {
+                    // Reset countdown if conditions no longer met
+                    if (g_state.sensor.auto_off_pending) {
+                        g_state.sensor.auto_off_pending = false;
+                        g_state.sensor.auto_off_countdown_ms = 0;
+                        g_state.ui_needs_update = true;
+                        Serial.println("[Auto-Off] Timer cancelled (conditions cleared)");
+                    }
+                } else if (!g_state.sensor.auto_off_pending) {
+                    // Start 5-minute countdown
+                    g_state.sensor.auto_off_pending = true;
+                    g_state.sensor.auto_off_countdown_ms = millis() + AUTO_OFF_DELAY_MS;
+                    g_state.ui_needs_update = true;
+                    Serial.println("[Auto-Off] 5-minute countdown started (room empty, no class)");
+                } else if ((int32_t)(millis() - g_state.sensor.auto_off_countdown_ms) >= 0) {
+                    // Timer expired — turn everything off
+                    if (g_state.sensor.ac_on) {
+                        g_state.sensor.ac_on = false;
                         trigger_auto_off_ac = true;
                         target_temp = g_state.sensor.temp_target;
-                        fan_speed = g_state.sensor.ac_fan_speed;
-                        swing_mode = g_state.sensor.ac_swing_mode;
-                        Serial.println("[Auto-Off] AC auto off (empty, no class)");
+                        fan_speed   = g_state.sensor.ac_fan_speed;
+                        swing_mode  = g_state.sensor.ac_swing_mode;
+                        Serial.println("[Auto-Off] AC off (5-min timer expired)");
                     }
-                    if (g_state.sensor.light_on && g_state.sensor.app_controlled_light) {
+                    if (g_state.sensor.light_on) {
                         g_state.sensor.light_on = false;
-                        g_state.sensor.app_controlled_light = false;
-                        g_state.ui_needs_update = true;
                         trigger_auto_off_light = true;
-                        Serial.println("[Auto-Off] Light auto off (empty, no class)");
+                        Serial.println("[Auto-Off] Light off (5-min timer expired)");
                     }
-                    if (g_state.sensor.projector_on && g_state.sensor.app_controlled_projector) {
+                    if (g_state.sensor.projector_on) {
                         g_state.sensor.projector_on = false;
-                        g_state.sensor.app_controlled_projector = false;
-                        g_state.ui_needs_update = true;
                         trigger_auto_off_projector = true;
-                        Serial.println("[Auto-Off] Projector auto off (empty, no class)");
+                        Serial.println("[Auto-Off] Projector off (5-min timer expired)");
                     }
+                    g_state.sensor.auto_off_pending = false;
+                    g_state.sensor.auto_off_countdown_ms = 0;
+                    g_state.ui_needs_update = true;
                 }
             }
 
@@ -668,9 +784,18 @@ void Task_Net(void* pvParameters) {
             if (trigger_schedule_light_on) {
                 rs485_request_light_command(true);
             }
+            if (trigger_fan_escalation) {
+                // Fan escalation: send AC command with new max fan speed
+                data_lock(g_state);
+                float esc_temp = g_state.sensor.temp_target;
+                uint8_t esc_swing = g_state.sensor.ac_swing_mode;
+                data_unlock(g_state);
+                rs485_request_ac_command(true, esc_temp, 0, 3, esc_swing);
+            }
             if (trigger_rs485_ac_off || trigger_rs485_light_off || trigger_schedule_publish ||
                 trigger_auto_off_ac || trigger_auto_off_light || trigger_auto_off_projector ||
-                ac_performance_warning_changed || save_needed) {
+                ac_performance_warning_changed || trigger_fan_escalation ||
+                trigger_led_warning_changed || save_needed) {
                 if (save_needed) {
                     data_save_device_config(g_state);
                 }

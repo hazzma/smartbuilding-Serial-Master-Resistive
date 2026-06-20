@@ -180,6 +180,8 @@ void data_load_dummy(BuildingState& state) {
         state.sensor.sched_shutdown_active = false;
         state.sensor.sched_shutdown_timer_ms = 0;
         state.sensor.sched_weekly.valid = false;
+        strncpy(state.sensor.last_mqtt_sched_payload, "-", sizeof(state.sensor.last_mqtt_sched_payload));
+        state.sensor.mqtt_sched_received_today = false;
         memset(state.sensor.sched_weekly.day_mask, 0, sizeof(state.sensor.sched_weekly.day_mask));
         memset(state.sensor.sched_active_sessions, 0, sizeof(state.sensor.sched_active_sessions));
         state.sensor.sched_active_session_count = 0;
@@ -204,6 +206,12 @@ void data_load_dummy(BuildingState& state) {
         state.sensor.app_controlled_ac = false;
         state.sensor.app_controlled_light = false;
         state.sensor.app_controlled_projector = false;
+        state.sensor.auto_off_pending = false;
+        state.sensor.auto_off_countdown_ms = 0;
+        state.sensor.led_check_warning = false;
+        state.sensor.led_check_start_ms = 0;
+        state.sensor.led_check_baseline_lux = -1.0f;
+        state.sensor.ac_fan_escalated = false;
 
         state.net.wifi_connected = true;
         state.net.lan_connected  = false;
@@ -405,6 +413,11 @@ void data_load_device_config(BuildingState& state) {
         snprintf(key, sizeof(key), "sw_day%u", d);
         state.sensor.sched_weekly.day_mask[d] = prefs.getUChar(key, 0);
     }
+    prefs.getString("mq_sch_pay", state.sensor.last_mqtt_sched_payload, sizeof(state.sensor.last_mqtt_sched_payload));
+    if (strlen(state.sensor.last_mqtt_sched_payload) == 0) {
+        strncpy(state.sensor.last_mqtt_sched_payload, "-", sizeof(state.sensor.last_mqtt_sched_payload));
+    }
+    state.sensor.mqtt_sched_received_today = prefs.getBool("mq_sch_rcv", false);
     memset(state.sensor.sched_active_sessions, 0, sizeof(state.sensor.sched_active_sessions));
     state.sensor.sched_active_session_count = 0;
     state.sensor.sched_today_sessions_bitmask = 0;
@@ -466,6 +479,8 @@ void data_save_device_config(BuildingState& state) {
         snprintf(key, sizeof(key), "sw_day%u", d);
         prefs.putUChar(key, state.sensor.sched_weekly.day_mask[d]);
     }
+    prefs.putString("mq_sch_pay", state.sensor.last_mqtt_sched_payload);
+    prefs.putBool("mq_sch_rcv", state.sensor.mqtt_sched_received_today);
 
     // Legacy save (backward compat)
     prefs.putUInt("sched_date", state.sensor.schedule_date_yyyymmdd);
