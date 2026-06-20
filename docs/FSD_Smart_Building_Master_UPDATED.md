@@ -508,46 +508,82 @@ SCREEN_KEYBOARD
 
 ### 5.4 WiFi State Machine
 
+All WiFi activity is governed by a **single `WifiState` enum** in `wifi_manager.cpp`.
+Only one state is active at a time — connection and scan processes are strictly
+mutually exclusive. No two WiFi processes may run simultaneously.
+
 ```text
-WIFI_IDLE
-   |
-   | connect requested
-   v
-WIFI_CONNECTING ---- timeout/error ---> WIFI_RETRY
-   |                                      |
-   v                                      |
-WIFI_CONNECTED <-------------------------+
+┌─────────────────────────────────────────────────────────────────────┐
+│                     WifiState Enum (wifi_manager.cpp)               │
+├───────────────┬─────────────────────────────────────────────────────┤
+│ WIFI_STATE    │ Description                                         │
+├───────────────┼─────────────────────────────────────────────────────┤
+│ IDLE          │ WiFi OFF or no credentials. Nothing active.         │
+│ CONNECTING    │ WiFi.begin() called. Waiting for WL_CONNECTED.      │
+│ CONNECTED     │ WL_CONNECTED confirmed. MQTT may proceed.           │
+│ FAILED        │ Connect failed/timed out. Waiting for user action.  │
+│ SCAN_PREPARE  │ Disconnecting STA + waiting 1500ms for radio settle.│
+│ SCAN_RUNNING  │ Async WiFi.scanNetworks() in progress.              │
+│ SCAN_DONE     │ Results copied. Restoring connection or → IDLE.     │
+└───────────────┴─────────────────────────────────────────────────────┘
+
+Transition diagram:
+
+  IDLE ──(creds + power ON)──────────────────► CONNECTING
+       ──(scan request)───────────────────────► SCAN_PREPARE
+
+  CONNECTING ──(WL_CONNECTED)────────────────► CONNECTED
+             ──(WL_CONNECT_FAILED / timeout)─► FAILED
+             ──(scan request)────────────────► SCAN_PREPARE
+
+  CONNECTED ──(WiFi drops)───────────────────► CONNECTING  (auto-retry)
+            ──(scan request)────────────────► SCAN_PREPARE
+
+  FAILED ──(user taps Reconnect)─────────────► CONNECTING
+         ──(scan request)────────────────────► SCAN_PREPARE
+
+  SCAN_PREPARE ──(radio settled ≥1500ms)─────► SCAN_RUNNING
+
+  SCAN_RUNNING ──(WiFi.scanComplete() ≥0)────► SCAN_DONE
+              ──(error / timeout 15s)─────────► SCAN_DONE
+
+  SCAN_DONE ──(restore_after_scan=true)──────► CONNECTING
+            ──(restore_after_scan=false)──────► IDLE
 ```
 
-WiFi connection and WiFi scan are separate state machines. A scan SHALL NOT block MQTT loop execution or UI rendering.
+**Key implementation rules:**
+
+- `WiFi.setAutoReconnect(false)` is set at init and NEVER changed. The state
+  machine exclusively owns reconnect logic.
+- On entry to `SCAN_PREPARE`: `WiFi.setAutoReconnect(false)` + `WiFi.disconnect(false,false)`
+  are called unconditionally, regardless of current state.
+- `wifi_restore_after_scan` is set to `true` only when scan is triggered from
+  `CONNECTING` or `CONNECTED` and there are saved credentials.
+- MQTT is signaled via `mqtt_request_reconnect()` when scan preempts a live connection.
 
 ### 5.5 WiFi Scan State Machine
 
+The scan is no longer a separate state machine. It is embedded in the unified
+`WifiState` enum as `SCAN_PREPARE → SCAN_RUNNING → SCAN_DONE`.
+
 ```text
-SCAN_IDLE
+SCAN_PREPARE
    |
-   | user request
-   v
-SCAN_REQUESTED
-   |
-   | Task_Net starts WiFi.scanNetworks(true, true)
+   | radio settle ≥1500ms
+   | WiFi.scanNetworks(true, true) == WIFI_SCAN_RUNNING
    v
 SCAN_RUNNING
    |
-   | WiFi.scanComplete()
-   +---- WIFI_SCAN_RUNNING ----> SCAN_RUNNING
-   |
-   +---- count >= 0 -----------> SCAN_DONE
-   |
-   +---- WIFI_SCAN_FAILED -----> SCAN_ERROR
-   |
-   +---- timeout 15s ----------> SCAN_ERROR
+   | WiFi.scanComplete() polling (every loop tick)
+   +─── still running ──────────────────────────► SCAN_RUNNING
+   +─── count >= 0 (success) ───────────────────► SCAN_DONE
+   +─── count < 0 (error) ──────────────────────► SCAN_DONE  (error flag set)
+   +─── elapsed > 15s (timeout) ────────────────► SCAN_DONE  (error flag set)
 
-SCAN_DONE / SCAN_ERROR
+SCAN_DONE
    |
-   | new request or screen refresh
-   v
-SCAN_REQUESTED
+   +─── restore_after_scan=true ────────────────► CONNECTING
+   +─── restore_after_scan=false ───────────────► IDLE
 ```
 
 Expected screen behavior:
