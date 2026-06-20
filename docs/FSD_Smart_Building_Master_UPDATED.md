@@ -99,9 +99,10 @@ What changed:
   an additional delayed Lux publish.
 - Schedule input SHALL be server-owned and UI-less on the master. The master
   SHALL always listen to `HD01/control/schedule`.
-- `HD01/control/schedule` SHALL support a weekly schedule payload or today-only schedule payload using a 6-digit binary bitmask (`S1S2S3S4S5S6` representing sessions S1 to S6).
-  - Single day format: `S1S2S3S4S5S6` (e.g. `010011` to enable sessions S2, S5, and S6 for today).
-  - Weekly format: `S1S2S3S4S5S6;S1S2S3S4S5S6;S1S2S3S4S5S6;S1S2S3S4S5S6;S1S2S3S4S5S6;S1S2S3S4S5S6;S1S2S3S4S5S6` (separated by semicolons for Monday to Sunday).
+- `HD01/control/schedule` SHALL support a weekly schedule payload or today-only schedule payload using a binary bitmask representing sessions S1 to S6.
+  - To support cases where payloads are sent or stored as integers and leading zeros are dropped, the parsing is performed from right to left (LSB on the right), mapping the rightmost character to session S1 (Bit 0), the second rightmost to session S2 (Bit 1), etc. Leading zeros are optional.
+  - Single day format: e.g., `"10011"` (equivalent to `"010011"`, enabling sessions S2, S5, and S6 for today), `"1"` (equivalent to `"000001"`, enabling S1), `"10"` (equivalent to `"000010"`, enabling S2).
+  - Weekly format: daily masks separated by semicolons for Monday to Sunday, e.g., `"10011;111000;0;0;0;0;0"`.
   A valid payload SHALL replace the previous stored schedule, re-cache active sessions for today, and reset trigger states.
 - The existing `PRE_CLASS_ON` and `CLASS_ENDED` schedule commands SHALL remain
   supported as fallback/manual event commands.
@@ -1331,7 +1332,7 @@ runtime template `<class_name>/control/<command_type>`.
 | `HD01/control/led` | Integer command | Forward LED command to target slave, wait for confirmation, publish LED integer state. |
 | `HD01/control/ac` | `PPTTFFSS` command | Forward AC command to target slave, wait for confirmation, publish latest AC state. |
 | `HD01/control/projector` | Integer command | Forward projector command to target slave, wait for confirmation, publish latest projector integer state. |
-| `HD01/control/schedule` | Event or weekly/daily bitmask schedule command | Accepts `PRE_CLASS_ON`, `CLASS_ENDED`, a today-only bitmask `S1S2S3S4S5S6`, or a full weekly bitmask schedule `S1S2S3S4S5S6;S1S2S3S4S5S6;...` (separated by semicolons for Mon-Sun). |
+| `HD01/control/schedule` | Event or weekly/daily bitmask schedule command | Accepts `PRE_CLASS_ON`, `CLASS_ENDED`, a today-only bitmask (parsed right-to-left, e.g., `"1"`, `"10"`, `"10011"`), or a full weekly bitmask schedule (separated by semicolons for Mon-Sun, e.g., `"10011;111000;0;0;0;0;0"`). |
 
 What changed: command handling is topic-based and confirmation-based.
 

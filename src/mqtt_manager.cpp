@@ -607,22 +607,25 @@ static bool mqtt_parse_weekly_schedule(char* payload_str) {
 
     while (token != nullptr && day_count < SCHEDULE_DAYS) {
         size_t tlen = strlen(token);
-        if (tlen != 6) {
-            // Not a valid 6-digit mask, try old format handlers
+        if (tlen == 0 || tlen > 12) {
+            // Not a valid mask length
             return false;
         }
-        // Parse 6 digits, each must be '0' or '1'
-        uint8_t mask = 0;
-        bool valid = true;
-        for (uint8_t i = 0; i < 6; i++) {
-            if (token[i] == '1') {
-                mask |= (1 << i);
-            } else if (token[i] != '0') {
-                valid = false;
-                break;
+        // Validate that all characters are '0' or '1'
+        for (size_t i = 0; i < tlen; i++) {
+            if (token[i] != '0' && token[i] != '1') {
+                return false;
             }
         }
-        if (!valid) return false;
+        // Parse right-to-left (LSB on the right)
+        uint8_t mask = 0;
+        for (uint8_t i = 0; i < SCHEDULE_SESSION_COUNT; i++) {
+            if (i < tlen) {
+                if (token[tlen - 1 - i] == '1') {
+                    mask |= (1 << i);
+                }
+            }
+        }
         day_masks[day_count] = mask;
         day_count++;
         token = strtok_r(nullptr, ";", &save_ptr);

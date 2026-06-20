@@ -114,29 +114,17 @@ Currently, the Projector IR control operates as a one-way (simplex) transmission
 The master does not need a local UI for schedule editing. It always listens to
 `HD01/control/schedule` and accepts schedule input from the server.
 
-1. **Daily Schedule Payload (Preferred Server Flow)**:
+1. **Daily/Weekly Bitmask Schedule Payload (Active V2.8 Flow)**:
    - Topic: `HD01/control/schedule`
-   - Payload format:
-     ```text
-     YYYYMMDD;HHMM-HHMM;HHMM-HHMM;...
-     ```
-   - Example:
-     ```text
-     20260609;0800-0930;1015-1200;1330-1500
-     ```
-   - The first field is the local date.
-   - Each following field is one class session, with start and end time in local
-     master time.
-   - A valid daily payload SHALL replace/overwrite the previous stored schedule
-     and reset all per-slot trigger flags.
-   - This overwrite behavior is intentional: the server may send the full daily
-     schedule once around midnight, and the master can continue running the day's
-     tasks locally if MQTT/server availability becomes unstable later.
-   - A date-only payload such as `20260609` means the room has no class sessions
-     that day and should clear previous slots for that date.
-   - Recommended limits:
-     - Max `8` sessions per day.
-     - Reject invalid times, `start >= end`, malformed fields, or too many slots.
+   - Payload format: `S1S2S3S4S5S6` (today-only) or `S1S2S3S4S5S6;S1S2S3S4S5S6;S1S2S3S4S5S6;S1S2S3S4S5S6;S1S2S3S4S5S6;S1S2S3S4S5S6;S1S2S3S4S5S6` (separated by semicolons for Monday to Sunday) representing sessions S1 to S6.
+   - **Right-to-Left parsing order (LSB on the right)** is used to support payloads sent or stored as integers where leading zeros are omitted. The rightmost character maps to session S1 (Bit 0), the second rightmost to S2 (Bit 1), etc. Leading zeros are optional.
+   - Example (single day): `"10011"` (equivalent to `"010011"`, enabling sessions S2, S5, and S6 for today), `"1"` (equivalent to `"000001"`, enabling S1), or `"10"` (equivalent to `"000010"`, enabling S2).
+   - Example (weekly): `"10011;111000;0;0;0;0;0"` (Monday S2, S5, S6 active; Tuesday S4, S5, S6 active; other days none).
+   - A valid payload replaces/overwrites the previous stored schedule, re-caches active sessions for today, and resets slot trigger flags.
+2. **Daily Schedule Payload (Legacy Flow, kept for NVS compat only)**:
+   - Topic: `HD01/control/schedule`
+   - Legacy format: `YYYYMMDD;HHMM-HHMM;HHMM-HHMM;...` (e.g. `20260609;0800-0930;1015-1200;1330-1500`).
+   - Limits: Max 8 sessions per day, reject invalid times, `start >= end`, or malformed fields.
 2. **Local Schedule Execution**:
    - The master checks local RTC/time periodically.
    - For each stored slot:
