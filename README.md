@@ -433,6 +433,24 @@ Firmware V2 slave configuration effect:
 - `IR_COMBO_NODE` may expose AC 1, AC 2, and Projector on one IR slave.
 - Slave firmware remains RAM-only and policy-blind.
 
+### How Master Assigns Capabilities to Slaves
+
+In this master-orchestrated architecture, slave nodes are designed to be "policy-blind" and generic:
+
+1. **Boot / Recovery State**: Upon boot, the slave has no persistent role or address configuration of its own. It starts up at the default Modbus pairing address `247` with all capability assignment registers (`0x0010..0x0017`) initialized to `0`.
+2. **Master-Owned Registry**: The master HMI is the central database. It stores the mapping of each slave's unique MAC address to its assigned Modbus address, name, and Device Profile.
+3. **Dynamic Write Sequence**:
+   - During first-time pairing or after a slave reboots (startup recovery), the master writes the slave's assigned capability bits to registers `0x0010..0x0017` on the slave.
+   - For example, if the slave is assigned the `TEMP_NODE` profile, the master writes a bitmask to register `0x0010` (`TEMP_SENSOR_ASSIGNMENT`) enabling the DHT/temperature sensors.
+   - The master then writes the permanent address (`2..246`) to register `0x0000` (`NODE_ADDRESS`).
+4. **Slave-Side Initialization**:
+   - The slave firmware monitors these holding registers. When it reads non-zero assignment values (e.g., bit active in `TEMP_SENSOR_ASSIGNMENT`), the slave dynamically starts its internal sensor initialization (e.g., calling sensor `begin()` / setup on GPIO pins) and begins reading the sensor data into the Modbus sensor block registers (`0x0100..0x010E`).
+   - If the registers are `0`, the slave leaves those sensors uninitialized and inactive.
+5. **Advantages**:
+   - **Hot-swappable**: If a slave fails, it can be replaced with an identical unconfigured device. The master will recognize the replacement, send the configuration registers, and the device will immediately assume the correct role.
+   - **RAM-only Slaves**: Slaves do not require NVS/EEPROM writes for their roles, increasing reliability and longevity.
+
+
 ## Build & Environment Setup
 
 ### ⚙️ PlatformIO Environment Locking
