@@ -185,6 +185,7 @@ own Lux zone and use a persistent `INCONCLUSIVE` state before raising a warning.
 - Every valid weekly/daily schedule payload immediately replaces the previous stored schedule, re-caches today's active sessions, and resets trigger states.
 - Adds conservative AC cooling-performance monitoring through Alert Bit 6
   without requiring room temperature to reach the AC setpoint.
+- Memperbaiki bug WiFi Scan Failed (-2) bawaan platform Arduino Core dengan mengubah implementasi asinkronus menjadi blocking scan pada Core 0 (jaringan), yang terbukti tidak memblokir atau membekukan UI pada Core 1.
 - Full implementation status and remaining Lux work: `docs/V2.8_Planning.md`.
 
 ### V2.7.1
@@ -275,6 +276,18 @@ own Lux zone and use a persistent `INCONCLUSIVE` state before raising a warning.
 | `src/rs485_manager.*` | RS485 Modbus master, pairing, polling, control writes |
 | `src/mapping_manager.*` | Slave registry to dashboard logical model |
 | `src/data.*` | Shared `BuildingState` and persistence |
+
+## Multi-Core Task Architecture
+
+Firmware ini dirancang untuk berjalan secara multi-tasking memanfaatkan arsitektur dual-core ESP32-S3. Komunikasi dan protokol dijalankan di **Core 0**, sedangkan visual render HMI dan input layar sentuh dipisahkan di **Core 1** demi menjamin kelancaran antarmuka (UI bebas dari stuttering/lag).
+
+| Task Name | Core | Priority | Stack Size (Bytes) | Source File | Responsibility |
+|---|:---:|:---:|:---:|---|---|
+| `Task_Net` | **Core 0** | 1 | 8,192 | [main.cpp](file:///c:/Users/hanse/Documents/PlatformIO/S3%20Master%20Serial%20resistif/src/main.cpp) | Mengelola state network, loop WiFi (`wifi_manager_loop`), loop MQTT (`mqtt_loop`), pembaruan waktu NTP, serta pengecekan logika scheduler/timer otomatis. |
+| `Task_RS485` | **Core 0** | 1 | 4,096 | [rs485_manager.cpp](file:///c:/Users/hanse/Documents/PlatformIO/S3%20Master%20Serial%20resistif/src/rs485_manager.cpp) | Menangani polling Modbus RTU ke slave nodes secara round-robin, serta mengurus proses discovery/pairing alamat 247 secara mandiri. |
+| `Task_LAN` | **Core 0** | 1 | 4,096 | [lan_manager.cpp](file:///c:/Users/hanse/Documents/PlatformIO/S3%20Master%20Serial%20resistif/src/lan_manager.cpp) | Mengelola status koneksi Ethernet W5500 dan memeriksa status link kabel LAN secara periodik. |
+| `Task_Touch` | **Core 1** | 1 | 4,096 | [main.cpp](file:///c:/Users/hanse/Documents/PlatformIO/S3%20Master%20Serial%20resistif/src/main.cpp) | Melakukan polling sensor layar sentuh XPT2046 secara periodik (50Hz / tiap 20ms) dan mendistribusikan koordinat sentuh ke UI. |
+| `Task_UI` | **Core 1** | 4 | 16,384 | [main.cpp](file:///c:/Users/hanse/Documents/PlatformIO/S3%20Master%20Serial%20resistif/src/main.cpp) | Render engine utama HMI menggunakan LovyanGFX Sprite buffer. Berjalan dengan prioritas tinggi untuk rendering animasi dan visual yang mulus (~40 FPS). |
 
 ## UI Flow
 
@@ -455,7 +468,20 @@ In this master-orchestrated architecture, slave nodes are designed to be "policy
 
 ### ⚙️ PlatformIO Environment Locking
 
-Untuk memastikan stabilitas sistem WiFi scan dan menghindari bug asinkronus/disconnect pada Arduino Core terbaru (3.0.x+), versi platform **espressif32** dikunci pada **`6.5.0`** (menggunakan Arduino Core v2.0.14 stabil). Jangan mengubah atau menghapus penguncian versi ini di `platformio.ini` tanpa pengujian menyeluruh pada fungsionalitas asinkronus WiFi & MQTT socket.
+Untuk memastikan stabilitas jaringan utama dan menghindari bug pemutusan koneksi (disconnect) yang sering terjadi pada socket MQTT di Arduino Core terbaru (3.0.x+), versi platform **espressif32** dikunci pada **`6.5.0`** (menggunakan Arduino Core v2.0.14 stabil). Jangan mengubah atau menghapus penguncian versi ini di `platformio.ini` tanpa pengujian menyeluruh pada fungsionalitas koneksi WiFi & MQTT socket.
+
+### 📶 Masalah WiFi Scan Failed (-2) & Solusinya (Fix)
+
+Di platform `espressif32@6.5.0` (Arduino Core v2.0.14 / ESP-IDF v4.4.6) pada chip ESP32-S3, terdapat bug bawaan di mana pemindaian WiFi secara asinkronus (`WiFi.scanNetworks(true, true)`) tidak memicu callback `WIFI_EVENT_SCAN_DONE` dengan benar. Hal ini menyebabkan status scan terus-menerus mengembalikan error code `-2` (`WIFI_SCAN_FAILED`) dan daftar WiFi tidak pernah muncul.
+
+#### Bagaimana Masalah Ini Diselesaikan (Fix):
+1. **Migrasi ke Blocking Scan**: Kami mengubah pemindaian WiFi menjadi sinkronus/blocking dengan memanggil `WiFi.scanNetworks(false, true)`.
+2. **Tidak Mengganggu Responsivitas Layar (Multi-Core)**: 
+   - Pemanggilan blocking scan ini memakan waktu sekitar 3–6 detik dan dijalankan pada thread jaringan (`Task_Net`) di **Core 0**.
+   - Karena rendering UI dan penanganan input sentuh (touchscreen) berjalan mandiri di **Core 1**, layar HMI tetap sepenuhnya responsif (tidak membeku/freeze) saat pemindaian berlangsung.
+3. **Pemberitahuan UI Sebelum Blocking**: Sebelum fungsi blocking dipanggil, status di layar langsung diperbarui menjadi `"Scanning (attempt X)..."` sehingga pengguna mendapatkan umpan balik visual instan.
+4. **Retry & Backoff Logic**: Jika scan gagal, sistem akan mencoba kembali secara otomatis hingga **4 kali** dengan jeda waktu progresif (*progressive backoff*): `1200ms × jumlah attempt`.
+5. **Auto-Restore Connection**: Setelah proses scan selesai atau gagal maksimal, koneksi WiFi ke SSID lama yang tersimpan akan dipulihkan kembali secara otomatis.
 
 Konfigurasi lingkungan pada `platformio.ini`:
 ```ini

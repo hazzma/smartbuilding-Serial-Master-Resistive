@@ -945,7 +945,7 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
             Serial.println("[MQTT] Schedule: CLASS_ENDED command received");
             data_lock(g_state);
             g_state.sensor.sched_shutdown_active = true;
-            g_state.sensor.sched_shutdown_timer_ms = millis() + (20 * 60 * 1000);
+            g_state.sensor.sched_shutdown_timer_ms = millis();
             g_state.ui_needs_update = true;
             data_unlock(g_state);
             mqtt_publish_state();

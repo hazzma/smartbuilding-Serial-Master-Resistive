@@ -27,6 +27,10 @@ static void lan_update_runtime_state(const char* detail_override = nullptr) {
     IPAddress sn = Ethernet.subnetMask();
     IPAddress dns = Ethernet.dnsServerIP();
 
+    // Koneksi dianggap "connected" hanya jika kabel ON DAN IP valid (bukan 0.0.0.0)
+    bool ip_valid = (ip[0] != 0 || ip[1] != 0 || ip[2] != 0 || ip[3] != 0);
+    bool actually_connected = (link_status == LinkON) && ip_valid;
+
     char ip_buf[16];
     char gw_buf[16];
     char sn_buf[16];
@@ -37,7 +41,7 @@ static void lan_update_runtime_state(const char* detail_override = nullptr) {
     lan_format_ip_or_dash(dns, dns_buf, sizeof(dns_buf));
 
     data_lock(g_state);
-    g_state.net.lan_connected = (link_status == LinkON);
+    g_state.net.lan_connected = actually_connected;
     strncpy(g_state.net.lan_ip, ip_buf, sizeof(g_state.net.lan_ip) - 1);
     strncpy(g_state.net.lan_current_gateway, gw_buf, sizeof(g_state.net.lan_current_gateway) - 1);
     strncpy(g_state.net.lan_current_subnet, sn_buf, sizeof(g_state.net.lan_current_subnet) - 1);
@@ -48,8 +52,9 @@ static void lan_update_runtime_state(const char* detail_override = nullptr) {
     g_state.net.lan_current_dns[sizeof(g_state.net.lan_current_dns) - 1] = '\0';
 
     const char* link_label = "Unknown";
-    if (link_status == LinkON) link_label = "Cable connected";
-    else if (link_status == LinkOFF) link_label = "Cable unplugged";
+    if (link_status == LinkON && ip_valid)  link_label = "Cable connected";
+    else if (link_status == LinkON)         link_label = "Cable ON (no IP)";
+    else if (link_status == LinkOFF)        link_label = "Cable unplugged";
     strncpy(g_state.net.lan_link_status, link_label, sizeof(g_state.net.lan_link_status) - 1);
     g_state.net.lan_link_status[sizeof(g_state.net.lan_link_status) - 1] = '\0';
 
@@ -208,13 +213,28 @@ void lan_loop() {
     if (millis() - last_link_check > 2000) {
         last_link_check = millis();
         bool link = (Ethernet.linkStatus() == LinkON);
+        IPAddress ip = Ethernet.localIP();
+        bool ip_valid = (ip[0] != 0 || ip[1] != 0 || ip[2] != 0 || ip[3] != 0);
+        bool actually_connected = link && ip_valid;
+
         data_lock(g_state);
-        if (g_state.net.lan_connected != link) {
-            Serial.printf("[LAN] Link Status Changed: %s\n", link ? "CONNECTED" : "DISCONNECTED");
-            data_unlock(g_state);
-            lan_update_runtime_state(link ? nullptr : "Cable unplugged");
-        } else {
-            data_unlock(g_state);
+        bool was_connected = g_state.net.lan_connected;
+        data_unlock(g_state);
+
+        if (was_connected != actually_connected || (!ip_valid && link)) {
+            Serial.printf("[LAN] Status Changed: link=%s ip_valid=%s connected=%s\n",
+                          link ? "ON" : "OFF",
+                          ip_valid ? "yes" : "no",
+                          actually_connected ? "CONNECTED" : "DISCONNECTED");
+
+            if (link && !ip_valid) {
+                // Kabel ON tapi IP 0.0.0.0 — static IP belum terpasang, trigger reinit
+                Serial.println("[LAN] Link ON but no IP — reinitializing Ethernet");
+                lan_update_runtime_state("Link ON: re-applying IP config");
+                lan_needs_restart = true;
+            } else {
+                lan_update_runtime_state(actually_connected ? nullptr : "Cable unplugged");
+            }
         }
     }
 

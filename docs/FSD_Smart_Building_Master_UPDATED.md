@@ -556,11 +556,10 @@ Transition diagram:
 - `WiFi.setAutoReconnect(false)` is set at init and scan restore, ensuring the master 
   exclusively controls reconnection attempts.
 - Reconnection Attempts: If the initial connection or reconnection (due to dropped WiFi) is 
-  triggered, the WiFi manager attempts to connect for up to 15 seconds per try, retrying up to 
-  a maximum of **3 times**. If all 3 attempts fail, the connection is abandoned and marked as 
-  `FAILED: Max retries reached`. The retry count resets on success.
+  triggered, the WiFi manager attempts to connect for up to 15 seconds per try, retrying **indefinitely (non-stop)**.
+  The connection detail is updated with the current attempt count (`Attempt X`). The count resets on success.
 - On entry to `SCAN_PREPARE`: `WiFi.setAutoReconnect(false)` + `WiFi.disconnect(false,false)`
-  are called unconditionally. Reconnection checks and attempts are paused during the active scan.
+  are called unconditionally. Reconnection checks and attempts are paused during the active scan, and resumed afterward.
 - `wifi_restore_after_scan` is set to `true` only when scan is triggered from
   `CONNECTING` or `CONNECTED` and there are saved credentials.
 - MQTT is signaled via `mqtt_request_reconnect()` when scan preempts a live connection.

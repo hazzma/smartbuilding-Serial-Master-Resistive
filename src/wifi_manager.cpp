@@ -10,10 +10,9 @@ static bool wifi_was_connected = false;
 static int wifi_reconnect_attempts = 0;
 static uint32_t wifi_connect_start_ms = 0;
 static const uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
-static const uint32_t WIFI_SCAN_TIMEOUT_MS = 15000;
-static const uint32_t WIFI_SCAN_RADIO_WARMUP_MS = 900;
-static const uint32_t WIFI_SCAN_RETRY_DELAY_MS = 900;
-static const uint8_t WIFI_SCAN_START_MAX_ATTEMPTS = 2;
+static const uint32_t WIFI_SCAN_RADIO_WARMUP_MS = 1500;
+static const uint32_t WIFI_SCAN_RETRY_DELAY_MS = 1200;
+static const uint8_t WIFI_SCAN_START_MAX_ATTEMPTS = 4;
 static uint32_t wifi_scan_start_ready_ms = 0;
 static uint32_t wifi_scan_retry_at_ms = 0;
 
@@ -72,14 +71,14 @@ void wifi_manager_connect(const char* ssid, const char* pass) {
     g_state.net.saved_wifi_ssid[sizeof(g_state.net.saved_wifi_ssid) - 1] = '\0';
     strncpy(g_state.net.saved_wifi_pass, pass ? pass : "", sizeof(g_state.net.saved_wifi_pass) - 1);
     g_state.net.saved_wifi_pass[sizeof(g_state.net.saved_wifi_pass) - 1] = '\0';
-    strcpy(g_state.net.wifi_status_detail, "CONNECTING (1/3)...");
+    strcpy(g_state.net.wifi_status_detail, "CONNECTING (Attempt 1)...");
     g_state.ui_needs_update = true;
     data_unlock(g_state);
 }
 
 void wifi_manager_load_and_connect() {
-    String ssid = prefs.getString("ssid", "han");
-    String pass = prefs.getString("pass", "hanhanhan");
+    String ssid = prefs.getString("ssid", "");
+    String pass = prefs.getString("pass", "");
     if (ssid.length() > 0) {
         Serial.printf("[WIFI] Auto-connecting to SSID: %s\n", ssid.c_str());
         WiFi.mode(WIFI_STA);
@@ -95,8 +94,8 @@ void wifi_manager_load_and_connect() {
 }
 
 void wifi_manager_reconnect() {
-    String ssid = prefs.getString("ssid", "han");
-    String pass = prefs.getString("pass", "hanhanhan");
+    String ssid = prefs.getString("ssid", "");
+    String pass = prefs.getString("pass", "");
     if (ssid.length() > 0) {
         Serial.printf("[WIFI] Manual Reconnect to: %s\n", ssid.c_str());
         WiFi.mode(WIFI_STA);
@@ -108,22 +107,17 @@ void wifi_manager_reconnect() {
         wifi_connect_start_ms = millis();
         wifi_was_connected = false;
         data_lock(g_state);
-        strcpy(g_state.net.wifi_status_detail, "CONNECTING (1/3)...");
+        strcpy(g_state.net.wifi_status_detail, "CONNECTING (Attempt 1)...");
         g_state.ui_needs_update = true;
         data_unlock(g_state);
     }
 }
 
 void wifi_manager_scan_request() {
-    // Cegah scan jika WiFi sedang dalam proses koneksi
+    // Pause connection attempts if currently connecting
     if (wifi_connecting) {
-        Serial.println("[SCAN] Ignored: WiFi is connecting");
-        data_lock(g_state);
-        strncpy(g_state.net.wifi_scan_status, "Busy connecting...", sizeof(g_state.net.wifi_scan_status) - 1);
-        g_state.net.wifi_scan_status[sizeof(g_state.net.wifi_scan_status) - 1] = '\0';
-        g_state.ui_needs_update = true;
-        data_unlock(g_state);
-        return;
+        wifi_connecting = false;
+        Serial.println("[SCAN] Paused active connection for scan");
     }
 
     data_lock(g_state);
@@ -180,8 +174,8 @@ static void wifi_scan_restore_after_stop() {
     if (!wifi_scan_restore_connect) return;
 
     wifi_scan_restore_connect = false;
-    String ssid = prefs.getString("ssid", "han");
-    String pass = prefs.getString("pass", "hanhanhan");
+    String ssid = prefs.getString("ssid", "");
+    String pass = prefs.getString("pass", "");
     if (ssid.length() == 0) return;
 
     Serial.printf("[WIFI] Restoring connection to: %s\n", ssid.c_str());
@@ -193,7 +187,7 @@ static void wifi_scan_restore_after_stop() {
     wifi_was_connected = false;
 
     data_lock(g_state);
-    strcpy(g_state.net.wifi_status_detail, "CONNECTING (1/3)...");
+    strcpy(g_state.net.wifi_status_detail, "CONNECTING (Attempt 1)...");
     g_state.ui_needs_update = true;
     data_unlock(g_state);
 }
@@ -208,9 +202,13 @@ static void wifi_scan_prepare_start() {
 
     Serial.println("[SCAN] Disconnecting and disabling auto-reconnect for scan");
     WiFi.setAutoReconnect(false);
-    WiFi.disconnect(false, false);
-
+    // Clean up any previous scan state first
     WiFi.scanDelete();
+    // Disconnect with wifioff=false, eraseap=false
+    WiFi.disconnect(false, false);
+    // Delete again after disconnect to ensure clean state
+    WiFi.scanDelete();
+
     wifi_scan_start_ready_ms = millis() + WIFI_SCAN_RADIO_WARMUP_MS;
     wifi_scan_retry_at_ms = 0;
 
@@ -249,7 +247,10 @@ static void wifi_scan_fail(int code, const char* message) {
     wifi_scan_restore_after_stop();
 }
 
-static void wifi_scan_start_async() {
+// Forward declaration — wifi_scan_finish is defined below but called by wifi_scan_start_blocking
+static void wifi_scan_finish(int count, bool timed_out);
+
+static void wifi_scan_start_blocking() {
     uint8_t attempts = 0;
     data_lock(g_state);
     attempts = g_state.net.wifi_scan_start_attempts;
@@ -263,42 +264,62 @@ static void wifi_scan_start_async() {
         return;
     }
 
-    WiFi.scanDelete();
-    int started = WiFi.scanNetworks(true, true);
-    uint32_t now = millis();
-
-    data_lock(g_state);
-    g_state.net.wifi_scan_start_attempts = attempts + 1;
-    g_state.net.wifi_scan_started_ts = now;
-    g_state.net.wifi_scan_done = false;
-    g_state.net.wifi_scan_error = false;
-
-    if (started == WIFI_SCAN_RUNNING) {
-        g_state.net.wifi_scan_start_pending = false;
-        g_state.net.wifi_scan_radio_warming = false;
-        g_state.net.wifi_scan_active = true;
-        strncpy(g_state.net.wifi_scan_status, "Scanning...", sizeof(g_state.net.wifi_scan_status) - 1);
-        Serial.println("[SCAN] Async scan started");
-    } else {
-        g_state.net.wifi_scan_active = false;
-        g_state.net.wifi_scan_radio_warming = false;
-        snprintf(g_state.net.wifi_scan_status, sizeof(g_state.net.wifi_scan_status), "Scan busy, retrying...");
-        Serial.printf("[SCAN] Start attempt %u failed: %d\n", attempts + 1, started);
+    // Ensure WiFi is in STA mode
+    if (WiFi.getMode() != WIFI_STA) {
+        WiFi.mode(WIFI_STA);
     }
 
+    WiFi.scanDelete();
+    delay(50);  // Brief settle time for driver state
+
+    // Update status before blocking call (UI on Core 1 will pick this up)
+    data_lock(g_state);
+    g_state.net.wifi_scan_start_attempts = attempts + 1;
+    g_state.net.wifi_scan_start_pending = false;
+    g_state.net.wifi_scan_radio_warming = false;
+    g_state.net.wifi_scan_active = true;
+    snprintf(g_state.net.wifi_scan_status, sizeof(g_state.net.wifi_scan_status),
+             "Scanning (attempt %u)...", attempts + 1);
     g_state.net.wifi_scan_status[sizeof(g_state.net.wifi_scan_status) - 1] = '\0';
     g_state.ui_needs_update = true;
     data_unlock(g_state);
 
-    if (started == WIFI_SCAN_RUNNING) {
+    Serial.printf("[SCAN] Starting BLOCKING scan (attempt %u/%u)...\n", attempts + 1, WIFI_SCAN_START_MAX_ATTEMPTS);
+
+    // *** BLOCKING CALL — blocks Task_Net for ~3-6 seconds ***
+    // This is intentional: async scan is broken on ESP-IDF v4.4.6 + Arduino 2.0.14 (ESP32-S3)
+    int16_t count = WiFi.scanNetworks(false, true);
+
+    Serial.printf("[SCAN] Blocking scan returned: %d\n", count);
+
+    if (count >= 0) {
+        // Success — process results immediately
         scan_started_by_manager = true;
+        wifi_scan_finish(count, false);
         return;
     }
 
+    // Scan failed — retry with progressive backoff
+    Serial.printf("[SCAN] Scan attempt %u/%u failed with code %d\n", attempts + 1, WIFI_SCAN_START_MAX_ATTEMPTS, count);
+    WiFi.scanDelete();
+
     if (attempts + 1 >= WIFI_SCAN_START_MAX_ATTEMPTS) {
-        wifi_scan_fail(started, "Scan start failed");
+        wifi_scan_fail(count, "Scan failed");
     } else {
-        wifi_scan_retry_at_ms = millis() + WIFI_SCAN_RETRY_DELAY_MS;
+        // Re-enter start_pending state for next attempt
+        uint32_t backoff = WIFI_SCAN_RETRY_DELAY_MS * (attempts + 1);
+        wifi_scan_retry_at_ms = millis() + backoff;
+
+        data_lock(g_state);
+        g_state.net.wifi_scan_active = false;
+        g_state.net.wifi_scan_start_pending = true;
+        snprintf(g_state.net.wifi_scan_status, sizeof(g_state.net.wifi_scan_status),
+                 "Scan retry in %lus...", backoff / 1000);
+        g_state.net.wifi_scan_status[sizeof(g_state.net.wifi_scan_status) - 1] = '\0';
+        g_state.ui_needs_update = true;
+        data_unlock(g_state);
+
+        Serial.printf("[SCAN] Retrying in %lu ms\n", backoff);
     }
 }
 
@@ -358,14 +379,10 @@ static void wifi_scan_finish(int count, bool timed_out) {
 static void wifi_scan_loop() {
     bool should_start = false;
     bool start_pending = false;
-    bool is_active = false;
-    uint32_t started_ts = 0;
 
     data_lock(g_state);
     should_start = g_state.net.wifi_scan_requested && !g_state.net.wifi_scan_active;
     start_pending = g_state.net.wifi_scan_start_pending;
-    is_active = g_state.net.wifi_scan_active;
-    started_ts = g_state.net.wifi_scan_started_ts;
     data_unlock(g_state);
 
     if (should_start) {
@@ -374,26 +391,11 @@ static void wifi_scan_loop() {
     }
 
     if (start_pending) {
-        wifi_scan_start_async();
+        wifi_scan_start_blocking();
         return;
     }
 
-    if (!is_active) return;
-
-    int scan_status = WiFi.scanComplete();
-    if (scan_status == WIFI_SCAN_RUNNING) {
-        if (millis() - started_ts > WIFI_SCAN_TIMEOUT_MS) {
-            wifi_scan_finish(scan_status, true);
-        }
-        return;
-    }
-
-    if (scan_status < 0) {
-        wifi_scan_fail(scan_status, "Scan failed");
-        return;
-    }
-
-    wifi_scan_finish(scan_status, false);
+    // No async polling needed — blocking scan processes results immediately
 }
 
 void wifi_manager_loop() {
@@ -410,6 +412,10 @@ void wifi_manager_loop() {
         return;
     }
 
+    if (!wifi_power_policy_on) {
+        return;
+    }
+
     static uint32_t last_check = 0;
     if (millis() - last_check > 1000) {
         last_check = millis();
@@ -417,15 +423,37 @@ void wifi_manager_loop() {
         char next_ssid[32] = "-";
         char next_detail[64] = "DISCONNECTED";
 
+        // Helper: cek apakah IP sudah valid (bukan 0.0.0.0)
+        IPAddress localIP = WiFi.localIP();
+        bool has_valid_ip = (status == WL_CONNECTED) &&
+                            (localIP[0] != 0 || localIP[1] != 0 || localIP[2] != 0 || localIP[3] != 0);
+
         if (wifi_connecting) {
-            if (status == WL_CONNECTED) {
+            if (has_valid_ip) {
                 wifi_connecting = false;
                 wifi_was_connected = true;
                 wifi_reconnect_attempts = 0;
                 strncpy(next_ssid, WiFi.SSID().c_str(), sizeof(next_ssid) - 1);
                 next_ssid[sizeof(next_ssid) - 1] = '\0';
-                strcpy(next_detail, "SUCCESS: Connected");
-                Serial.println("[WIFI] Connection successful");
+                snprintf(next_detail, sizeof(next_detail), "SUCCESS: Connected (%u.%u.%u.%u)",
+                         localIP[0], localIP[1], localIP[2], localIP[3]);
+                Serial.printf("[WIFI] Connection successful. IP: %u.%u.%u.%u\n",
+                              localIP[0], localIP[1], localIP[2], localIP[3]);
+            } else if (status == WL_CONNECTED) {
+                // WL_CONNECTED tapi IP 0.0.0.0 = DHCP belum selesai, tunggu sampai timeout
+                bool dhcp_timeout = (millis() - wifi_connect_start_ms > WIFI_CONNECT_TIMEOUT_MS);
+                if (dhcp_timeout) {
+                    wifi_reconnect_attempts++;
+                    Serial.printf("[WIFI] DHCP timeout (no IP assigned). Retry count: %d. Retrying...\n", wifi_reconnect_attempts);
+                    String ssid = prefs.getString("ssid", "");
+                    String pass = prefs.getString("pass", "");
+                    WiFi.disconnect(false, false);
+                    WiFi.begin(ssid.c_str(), pass.c_str());
+                    wifi_connect_start_ms = millis();
+                    snprintf(next_detail, sizeof(next_detail), "CONNECTING (Attempt %d)...", wifi_reconnect_attempts + 1);
+                } else {
+                    snprintf(next_detail, sizeof(next_detail), "CONNECTING - Waiting IP (Attempt %d)...", wifi_reconnect_attempts + 1);
+                }
             } else {
                 bool attempt_failed = (millis() - wifi_connect_start_ms > WIFI_CONNECT_TIMEOUT_MS) ||
                                       (status == WL_CONNECT_FAILED) ||
@@ -433,37 +461,42 @@ void wifi_manager_loop() {
 
                 if (attempt_failed) {
                     wifi_reconnect_attempts++;
-                    Serial.printf("[WIFI] Connection attempt failed. Retry count: %d/3\n", wifi_reconnect_attempts);
+                    Serial.printf("[WIFI] Connection attempt failed. Retry count: %d. Retrying...\n", wifi_reconnect_attempts);
 
-                    if (wifi_reconnect_attempts < 3) {
-                        String ssid = prefs.getString("ssid", "");
-                        String pass = prefs.getString("pass", "");
-                        WiFi.disconnect(false, false);
-                        WiFi.begin(ssid.c_str(), pass.c_str());
-                        wifi_connect_start_ms = millis();
-                        snprintf(next_detail, sizeof(next_detail), "RETRETING (%d/3)...", wifi_reconnect_attempts + 1);
-                    } else {
-                        wifi_connecting = false;
-                        wifi_was_connected = false;
-                        WiFi.disconnect(true, false);
-                        strcpy(next_detail, "FAILED: Max retries reached");
-                        Serial.println("[WIFI] Connection failed after 3 attempts. Stopping.");
-                    }
+                    String ssid = prefs.getString("ssid", "");
+                    String pass = prefs.getString("pass", "");
+                    WiFi.disconnect(false, false);
+                    WiFi.begin(ssid.c_str(), pass.c_str());
+                    wifi_connect_start_ms = millis();
+                    snprintf(next_detail, sizeof(next_detail), "CONNECTING (Attempt %d)...", wifi_reconnect_attempts + 1);
                 } else {
-                    snprintf(next_detail, sizeof(next_detail), "CONNECTING (%d/3)...", wifi_reconnect_attempts + 1);
+                    snprintf(next_detail, sizeof(next_detail), "CONNECTING (Attempt %d)...", wifi_reconnect_attempts + 1);
                 }
             }
         } else {
-            if (status == WL_CONNECTED) {
+            if (has_valid_ip) {
                 wifi_was_connected = true;
                 wifi_reconnect_attempts = 0;
                 strncpy(next_ssid, WiFi.SSID().c_str(), sizeof(next_ssid) - 1);
                 next_ssid[sizeof(next_ssid) - 1] = '\0';
-                strcpy(next_detail, "SUCCESS: Connected");
+                snprintf(next_detail, sizeof(next_detail), "SUCCESS: Connected (%u.%u.%u.%u)",
+                         localIP[0], localIP[1], localIP[2], localIP[3]);
+            } else if (status == WL_CONNECTED) {
+                // Terhubung tapi kehilangan IP (misal DHCP expired), paksa reconnect
+                Serial.println("[WIFI] WL_CONNECTED but IP is 0.0.0.0 - forcing reconnect");
+                String ssid = prefs.getString("ssid", "");
+                String pass = prefs.getString("pass", "");
+                WiFi.disconnect(false, false);
+                WiFi.begin(ssid.c_str(), pass.c_str());
+                wifi_connecting = true;
+                wifi_reconnect_attempts = 0;
+                wifi_connect_start_ms = millis();
+                wifi_was_connected = false;
+                strcpy(next_detail, "CONNECTING (IP lost, Attempt 1)...");
             } else {
-                if (wifi_was_connected && prefs.getString("ssid", "").length() > 0) {
-                    Serial.println("[WIFI] Connection lost. Reconnecting (up to 3 retries)...");
-                    String ssid = prefs.getString("ssid", "");
+                String ssid = prefs.getString("ssid", "");
+                if (ssid.length() > 0) {
+                    Serial.println("[WIFI] Connection lost or not connected. Reconnecting...");
                     String pass = prefs.getString("pass", "");
                     WiFi.disconnect(false, false);
                     WiFi.begin(ssid.c_str(), pass.c_str());
@@ -471,7 +504,7 @@ void wifi_manager_loop() {
                     wifi_reconnect_attempts = 0;
                     wifi_connect_start_ms = millis();
                     wifi_was_connected = false;
-                    strcpy(next_detail, "RECONNECTING (1/3)...");
+                    strcpy(next_detail, "CONNECTING (Attempt 1)...");
                 } else {
                     if (status == WL_IDLE_STATUS || status == WL_DISCONNECTED) {
                         strcpy(next_detail, "IDLE: Disconnected");
@@ -487,9 +520,10 @@ void wifi_manager_loop() {
         data_lock(g_state);
         bool changed = strcmp(g_state.net.connected_wifi_ssid, next_ssid) != 0 ||
                        strcmp(g_state.net.wifi_status_detail, next_detail) != 0 ||
-                       g_state.net.wifi_connected != (status == WL_CONNECTED);
+                       g_state.net.wifi_connected != has_valid_ip;
 
-        g_state.net.wifi_connected = (status == WL_CONNECTED);
+        // wifi_connected hanya true jika benar-benar punya IP valid (bukan hanya WL_CONNECTED)
+        g_state.net.wifi_connected = has_valid_ip;
         strncpy(g_state.net.connected_wifi_ssid, next_ssid, sizeof(g_state.net.connected_wifi_ssid) - 1);
         g_state.net.connected_wifi_ssid[sizeof(g_state.net.connected_wifi_ssid) - 1] = '\0';
         strncpy(g_state.net.wifi_status_detail, next_detail, sizeof(g_state.net.wifi_status_detail) - 1);

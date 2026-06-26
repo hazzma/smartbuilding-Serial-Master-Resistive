@@ -532,10 +532,10 @@ void Task_Net(void* pvParameters) {
                             if (!class_schedule_active) {
                                 // No other session active -> start shutdown
                                 g_state.sensor.sched_shutdown_active = true;
-                                g_state.sensor.sched_shutdown_timer_ms = millis() + (20UL * 60UL * 1000UL);
+                                g_state.sensor.sched_shutdown_timer_ms = millis();
                                 trigger_schedule_publish = true;
                                 g_state.ui_needs_update = true;
-                                Serial.printf("[Schedule] Session S%u ended (%02u:%02u). Shutdown in 20 min\n",
+                                Serial.printf("[Schedule] Session S%u ended (%02u:%02u). Triggering immediate empty-room shutdown check\n",
                                               s + 1,
                                               schedule_get_session_end_min(s) / 60,
                                               schedule_get_session_end_min(s) % 60);
@@ -616,9 +616,9 @@ void Task_Net(void* pvParameters) {
                             // Only start shutdown if no new session from new schedule is active
                             if (!class_schedule_active) {
                                 g_state.sensor.sched_shutdown_active = true;
-                                g_state.sensor.sched_shutdown_timer_ms = millis() + (20UL * 60UL * 1000UL);
+                                g_state.sensor.sched_shutdown_timer_ms = millis();
                                 trigger_schedule_publish = true;
-                                Serial.println("[Schedule Legacy] Slot ended; shutdown in 20 min");
+                                Serial.println("[Schedule Legacy] Slot ended; triggering immediate empty-room shutdown check");
                             }
                         }
                     }

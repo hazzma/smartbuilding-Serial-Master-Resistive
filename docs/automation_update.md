@@ -142,9 +142,9 @@ The master does not need a local UI for schedule editing. It always listens to
 4. **Class Ended Event Fallback (Server to Master)**:
    - Topic: `HD01/control/schedule`
    - Payload: `"CLASS_ENDED"` (sent at the exact end of class).
-   - Action: Master starts a local 20-minute countdown timer (`shutdown_timer`).
+   - Action: Master triggers an immediate shutdown evaluation.
 5. **Shutdown Verification**:
-   - When the 20-minute `shutdown_timer` expires, the Master checks the human presence state:
+   - The Master checks the human presence state immediately (0-minute delay) when class ends:
      - **If `human_presence_valid == true` and `human_presence == false`** (Class is confirmed empty):
        - Master sends commands to turn OFF the AC and Lights.
      - **If `human_presence_valid == true` and `human_presence == true`** (Students or teacher still present):
@@ -250,10 +250,9 @@ Berikut adalah detail desain logis dari fitur-fitur baru yang telah aktif di imp
    - Parser bitmask jadwal mingguan (`HD01/control/schedule`) diselaraskan ke arah kanan (rightmost-aligned) di mana karakter paling kanan selalu dihubungkan dengan Sesi 6 (Bit 5 / `1 << 5`), dan berjalan ke kiri.
    - Ini secara tuntas memecahkan bug hilangnya leading zero saat payload dikirim dalam format integer oleh server/app (misalnya payload `"10"` didekode sebagai `"000010"` = Sesi 5 aktif, `"1"` didekode sebagai `"000001"` = Sesi 6 aktif, `"100000"` = Sesi 1 aktif).
 
- 5. **WiFi Manager & Manual Reconnect (3x Retries)**:
-    - Manajemen WiFi menggunakan kontrol manual (`WiFi.setAutoReconnect(false)`). Setiap kali koneksi gagal atau terputus, sistem akan mengulangi penyambungan hingga maksimal **3 kali percobaan** (timeout 15 detik per percobaan).
-    - Jika gagal 3 kali, status diset ke `FAILED: Max retries reached` dan koneksi dihentikan.
-    - Percobaan koneksi di-pause saat pemindaian WiFi (scan) sedang berlangsung untuk mencegah crash/collision pada driver. Setelah scan selesai, koneksi otomatis dipulihkan kembali ke NVS SSID.
+5. **WiFi Manager & Reconnect (Infinite Retries)**:
+   - Manajemen WiFi menggunakan kontrol manual (`WiFi.setAutoReconnect(false)`). Setiap kali koneksi gagal, terputus, atau baru pertama kali booting dengan kredensial tersimpan, sistem akan mengulangi penyambungan secara terus-menerus tanpa henti (non-stop) dengan timeout 15 detik per percobaan.
+   - Percobaan koneksi di-pause saat pemindaian WiFi (scan) sedang berlangsung untuk mencegah crash/collision pada driver, dan dilanjutkan kembali secara otomatis ke SSID terkonfigurasi setelah scan selesai.
 
 6. **Projector Fail Status Realignment**:
    - Jika verifikasi Lux projector gagal setelah 1x retry, state projector internal dipaksa kembali ke OFF, dan status `0` dikirim ulang ke MQTT topic `HD01/data/projector` agar state pada server selalu sinkron dengan kenyataan fisik.
