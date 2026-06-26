@@ -1,6 +1,8 @@
 #include "wifi_manager.h"
 #include "data.h"
 
+#define Serial if (g_serial_log_mode == LOG_NET) Serial
+
 static Preferences prefs;
 static bool wifi_power_policy_on = true;
 static bool scan_started_by_manager = false;

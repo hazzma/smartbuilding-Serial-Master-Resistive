@@ -311,6 +311,7 @@ struct NetworkState {
     bool  mqtt_ok;
     int   net_priority;           // 0=WiFi, 1=LAN
     bool  lan_use_dhcp;
+    bool  lan_mac_spoof;
     char  lan_ip[16];
     char  lan_current_gateway[16];
     char  lan_current_subnet[16];
@@ -404,5 +405,15 @@ uint8_t  schedule_get_day_of_week(); // 0=Monday..6=Sunday, returns 255 if time 
 bool     schedule_is_session_active(const WeeklyScheduleData& wsd, uint8_t day_index, uint8_t session_index);
 uint8_t  schedule_get_active_sessions_today(const WeeklyScheduleData& wsd);
 const char* schedule_get_day_name(uint8_t day_index);
+
+enum SerialLogMode {
+    LOG_SILENT = 0,
+    LOG_MQTT = 1,
+    LOG_NET = 2,
+    LOG_DATA = 3,
+    LOG_CALIB = 4,
+    LOG_RS485 = 5
+};
+extern SerialLogMode g_serial_log_mode;
 
 #endif

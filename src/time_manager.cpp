@@ -1,5 +1,7 @@
 #include "time_manager.h"
 #include "data.h"
+
+#define Serial if (g_serial_log_mode == LOG_NET) Serial
 #include <Dns.h>
 #include <sys/time.h>
 

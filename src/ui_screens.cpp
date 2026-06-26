@@ -2525,7 +2525,9 @@ bool screens_has_animation() {
 // ── Touch Handlers ────────────────────────────────────────────────────────────
 
 void handle_dashboard_touch_legacy(BuildingState& state, int tx, int ty) {
-    Serial.printf("[TOUCH] Dashboard tx:%d ty:%d\n", tx, ty);
+    if (g_serial_log_mode == LOG_CALIB) {
+        Serial.printf("[TOUCH] Dashboard tx:%d ty:%d\n", tx, ty);
+    }
 
     // Hamburger — kiri atas di notif bar
     if (isHit(tx, ty, 0, 0, 50, 35)) {
@@ -2574,7 +2576,9 @@ void handle_dashboard_touch_legacy(BuildingState& state, int tx, int ty) {
 }
 
 void handle_dashboard_touch(BuildingState& state, int tx, int ty) {
-    Serial.printf("[TOUCH] Dashboard tx:%d ty:%d\n", tx, ty);
+    if (g_serial_log_mode == LOG_CALIB) {
+        Serial.printf("[TOUCH] Dashboard tx:%d ty:%d\n", tx, ty);
+    }
 
     DashboardUiModel model = dashboard_make_ui_model(state);
 

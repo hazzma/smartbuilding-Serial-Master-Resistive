@@ -130,7 +130,7 @@ void drawPresenceBadge(int x, int y, int w, int h, bool detected) {
 
 void drawCO2Card(int x, int y, int w, int h, int co2) {
     uint16_t valColor = COLOR_STAT_ON;
-    if (co2 > 1500) valColor = COLOR_STAT_ERR;
+    if (co2 >= 4000) valColor = COLOR_STAT_ERR;
     else if (co2 > 1000) valColor = COLOR_STAT_WARN;
 
     drawCardBase(x, y, w, h, COLOR_CARD_BG);
@@ -264,7 +264,7 @@ void drawCO2Chip(int x, int y, int co2) {
     if (w < 96) w = 96;
 
     uint16_t color = COLOR_STAT_ON;
-    if (co2 > 1500) color = COLOR_STAT_ERR;
+    if (co2 >= 4000) color = COLOR_STAT_ERR;
     else if (co2 > 1000) color = COLOR_STAT_WARN;
 
     p_engine->fillRoundRect(x, y, w, 22, 7, p_engine->color565(12, 18, 30));

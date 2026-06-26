@@ -14,6 +14,8 @@
 #endif
 #include "mqtt_defaults.h"
 
+#define Serial if (g_serial_log_mode == LOG_MQTT) Serial
+
 // const char* mqtt_server       = MQTT_SERVER_DEFAULT;
 const int   mqtt_port_secure  = MQTT_PORT_SECURE_DEFAULT;
 const int   mqtt_port_normal  = MQTT_PORT_NORMAL_DEFAULT;

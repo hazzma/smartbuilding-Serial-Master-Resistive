@@ -5,6 +5,9 @@
 #include <Preferences.h>
 #include <Dns.h>
 #include "data.h"
+#include <esp_mac.h>
+
+#define Serial if (g_serial_log_mode == LOG_NET) Serial
 
 SPIClass lanSPI(2); // SPI2_HOST (HSPI) — dedicated to W5500, no conflict with TFT SPI3
 static bool lan_needs_restart = false;
@@ -79,6 +82,7 @@ void lan_manager_load_config() {
     strncpy(g_state.net.lan_gateway,   gw.c_str(), 16);
     strncpy(g_state.net.lan_subnet,    sn.c_str(), 16);
     strncpy(g_state.net.lan_dns,       dns.c_str(), 16);
+    g_state.net.lan_mac_spoof = prefs.getBool("mac_spoof", false);
     data_unlock(g_state);
     prefs.end();
 }
@@ -92,6 +96,7 @@ void lan_manager_save_config() {
     prefs.putString("gateway",   g_state.net.lan_gateway);
     prefs.putString("subnet",    g_state.net.lan_subnet);
     prefs.putString("dns",       g_state.net.lan_dns);
+    prefs.putBool("mac_spoof",   g_state.net.lan_mac_spoof);
     data_unlock(g_state);
     prefs.end();
     Serial.println("[LAN] Config Saved. Scheduling async restart...");
@@ -136,8 +141,18 @@ void lan_init() {
     lan_manager_load_config();
 
     uint8_t mac[6];
-    esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    mac[5] ^= 0x01;
+    bool use_spoof = false;
+    data_lock(g_state);
+    use_spoof = g_state.net.lan_mac_spoof;
+    data_unlock(g_state);
+
+    if (use_spoof) {
+        // VMware spoofed MAC (working on lab network)
+        mac[0] = 0x00; mac[1] = 0x50; mac[2] = 0x56; mac[3] = 0xC0; mac[4] = 0x00; mac[5] = 0x01;
+    } else {
+        // Default unique MAC based on ESP32 Base MAC
+        esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    }
 
     pinMode(LAN_RST, OUTPUT);
     digitalWrite(LAN_RST, LOW);

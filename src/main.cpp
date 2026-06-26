@@ -12,6 +12,8 @@
 #include "rs485_manager.h"
 #include "mapping_manager.h"
 
+#define Serial if (g_serial_log_mode == LOG_DATA) Serial
+
 // Set to 1 to inject a local dummy RS485 slave for UI/home-screen testing.
 // Set to 0 to remove the dummy slave and use only real discovered devices.
 #define ENABLE_DUMMY_RS485_SLAVE 0
@@ -803,15 +805,19 @@ void Task_Net(void* pvParameters) {
             }
         }
 
+#undef Serial
         static uint32_t last_hb = 0;
         if (now - last_hb > 5000) {
             last_hb = now;
-            Serial.printf("[NET] Alive | Prio:%d | MQTT:%s | Heap:%u | Stack:%u\n",
-                          current_prio,
-                          is_mqtt_connected() ? "OK" : "FAIL",
-                          (unsigned)ESP.getFreeHeap(),
-                          (unsigned)uxTaskGetStackHighWaterMark(NULL));
+            if (g_serial_log_mode == LOG_NET) {
+                Serial.printf("[NET] Alive | Prio:%d | MQTT:%s | Heap:%u | Stack:%u\n",
+                              current_prio,
+                              is_mqtt_connected() ? "OK" : "FAIL",
+                              (unsigned)ESP.getFreeHeap(),
+                              (unsigned)uxTaskGetStackHighWaterMark(NULL));
+            }
         }
+#define Serial if (g_serial_log_mode == LOG_DATA) Serial
 
         vTaskDelay(pdMS_TO_TICKS(30));
     }
@@ -837,6 +843,8 @@ void Task_Touch(void* pvParameters) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Task_UI: Core 1 — LovyanGFX Sprite Render Engine (High Priority)
 // ─────────────────────────────────────────────────────────────────────────────
+#undef Serial
+
 void Task_UI(void* pvParameters) {
     int      frames        = 0;
     int      current_fps   = 0;
@@ -884,13 +892,194 @@ void Task_UI(void* pvParameters) {
             current_fps = frames;
             uint32_t avg_r = (frames > 0) ? (total_render / frames / 1000) : 0;
             uint32_t avg_p = (frames > 0) ? (total_push   / frames / 1000) : 0;
-            Serial.printf("[UI] FPS: %d | Render: %dms | Push: %dms\n",
-                          current_fps, avg_r, avg_p);
+            if (g_serial_log_mode == LOG_CALIB) {
+                Serial.printf("[UI] FPS: %d | Render: %dms | Push: %dms\n",
+                              current_fps, avg_r, avg_p);
+            }
             frames = 0; total_render = 0; total_push = 0;
             last_time = millis();
         }
 
         vTaskDelay(1);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Serial CLI Task & Menu Implementation
+// ─────────────────────────────────────────────────────────────────────────────
+const char* serial_log_mode_name(SerialLogMode mode) {
+    switch (mode) {
+        case LOG_SILENT: return "SILENT";
+        case LOG_MQTT:   return "MQTT MONITORING";
+        case LOG_NET:    return "NETWORK MONITORING";
+        case LOG_DATA:   return "SENSOR DATA MONITORING";
+        case LOG_CALIB:  return "TOUCH & DISPLAY CALIBRATION";
+        case LOG_RS485:  return "RS485 MODBUS POLLING";
+        default:         return "UNKNOWN";
+    }
+}
+
+void serial_cli_print_menu() {
+    Serial.println("\n==================================================");
+    Serial.println("       SMART BUILDING S3 MASTER SERIAL CLI");
+    Serial.println("==================================================");
+    Serial.printf("Current Log Mode: [%s]\n", serial_log_mode_name(g_serial_log_mode));
+    
+    // Print current MAC mode status
+    bool is_spoofed = false;
+    int current_prio = 0;
+    data_lock(g_state);
+    is_spoofed = g_state.net.lan_mac_spoof;
+    current_prio = g_state.net.net_priority;
+    data_unlock(g_state);
+    Serial.printf("LAN MAC Mode:     [%s]\n", is_spoofed ? "SPOOFED (00:50:56:C0:00:01)" : "DEFAULT ESP32 MAC");
+    Serial.printf("Network Priority: [%s]\n\n", current_prio == 0 ? "WIFI" : "LAN");
+
+    Serial.println("[1] Monitor MQTT (Status, Tx/Rx Data)");
+    Serial.println("[2] Monitor Network Connectivity (WiFi & LAN Status)");
+    Serial.println("[3] Monitor Sensor Data (Ambil Data Mode)");
+    Serial.println("[4] Monitor Display & Touch Diagnostics (Calibration/Raw)");
+    Serial.println("[5] Monitor RS485 Modbus Polling Packets");
+    Serial.println("[6] Toggle LAN MAC Address (Spoof vs Default)");
+    Serial.println("[7] Toggle Network Priority (WiFi vs LAN)");
+    Serial.println("[0] Silent Mode (Mute logs)");
+    Serial.println("\n[Enter] Redraw Menu");
+    Serial.println("==================================================");
+    Serial.print("Enter option (0-7): ");
+}
+
+void serial_cli_print_sensor_data() {
+    data_lock(g_state);
+    float t0 = g_state.sensor.temp[0];
+    float t1 = g_state.sensor.temp[1];
+    float t2 = g_state.sensor.temp[2];
+    float t3 = g_state.sensor.temp[3];
+    int co2 = g_state.sensor.co2;
+    float lux = g_state.sensor.lux;
+    bool presence = g_state.sensor.human_presence;
+    bool ac = g_state.sensor.ac_on;
+    bool light = g_state.sensor.light_on;
+    bool proj = g_state.sensor.projector_on;
+    data_unlock(g_state);
+
+    Serial.printf("[DATA] Temp: [T1=%.1f C, T2=%.1f C, T3=%.1f C, T4=%.1f C] | CO2: %d ppm | Lux: %.1f | Presence: %s | AC: %s | Light: %s | Proj: %s\n",
+                  t0, t1, t2, t3,
+                  co2,
+                  lux,
+                  presence ? "YES" : "NO",
+                  ac ? "ON" : "OFF",
+                  light ? "ON" : "OFF",
+                  proj ? "ON" : "OFF");
+}
+
+void Task_SerialCLI(void* pvParameters) {
+    // Wait for boot prints to settle
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    serial_cli_print_menu();
+
+    uint32_t last_sensor_print_ms = 0;
+    SerialLogMode prev_mode = LOG_SILENT;
+    uint32_t last_digit_ms = 0;
+
+    for (;;) {
+        // Print sensor data periodically if in LOG_DATA mode
+        if (g_serial_log_mode == LOG_DATA) {
+            uint32_t now = millis();
+            if (now - last_sensor_print_ms >= 2000) {
+                last_sensor_print_ms = now;
+                serial_cli_print_sensor_data();
+            }
+        }
+
+        // Handle transitions when g_serial_log_mode changes
+        if (g_serial_log_mode != prev_mode) {
+            // Exit cleanup of previous mode
+            if (prev_mode == LOG_DATA) {
+                data_lock(g_state);
+                g_state.sensor.data_collect_mode = false;
+                data_unlock(g_state);
+                data_save_device_config(g_state);
+                Serial.println("\n[SYSTEM] Mode Ambil Data: NON-AKTIF (Mode Biasa)");
+            } else if (prev_mode == LOG_CALIB) {
+                screens_set(SCREEN_DASHBOARD);
+                Serial.println("\n[UI] Returned to dashboard.");
+            }
+
+            // Entry action of new mode
+            if (g_serial_log_mode == LOG_DATA) {
+                data_lock(g_state);
+                g_state.sensor.data_collect_mode = true;
+                data_unlock(g_state);
+                data_save_device_config(g_state);
+                Serial.println("\n[SYSTEM] Mode Ambil Data: AKTIF (Kirim 10s)");
+            } else if (g_serial_log_mode == LOG_CALIB) {
+                screens_set(SCREEN_TOUCH_TEST);
+                Serial.println("\n[UI] Touch alignment test opened on display.");
+            }
+
+            prev_mode = g_serial_log_mode;
+        }
+
+        // Check for serial input
+        while (Serial.available() > 0) {
+            char c = Serial.read();
+            if (c == '\r' || c == '\n' || c == 'm' || c == 'M' || c == 'h' || c == 'H' || c == 'q' || c == 'Q') {
+                static uint32_t last_enter_ms = 0;
+                uint32_t now = millis();
+                if (now - last_digit_ms > 250) { // debounce: ignore enter key if pressed immediately after a number choice
+                    if (now - last_enter_ms > 100) {
+                        last_enter_ms = now;
+                        if (g_serial_log_mode != LOG_SILENT) {
+                            g_serial_log_mode = LOG_SILENT;
+                            Serial.println("\n>>> Returning to Main Menu <<<");
+                            serial_cli_print_menu();
+                        } else {
+                            serial_cli_print_menu();
+                        }
+                    }
+                }
+            } else if (c >= '0' && c <= '7') {
+                last_digit_ms = millis();
+                if (c == '6') {
+                    data_lock(g_state);
+                    g_state.net.lan_mac_spoof = !g_state.net.lan_mac_spoof;
+                    bool new_val = g_state.net.lan_mac_spoof;
+                    data_unlock(g_state);
+
+                    lan_manager_save_config(); // Saves to NVS and triggers LAN restart!
+
+                    Serial.printf("\n>>> LAN MAC Mode changed to: %s <<<\n", new_val ? "SPOOFED (00:50:56:C0:00:01)" : "DEFAULT (ESP32 MAC)");
+                    Serial.println("(Ethernet controller is restarting in the background...)\n");
+                    serial_cli_print_menu();
+                } else if (c == '7') {
+                    data_lock(g_state);
+                    g_state.net.net_priority = (g_state.net.net_priority == 0) ? 1 : 0;
+                    int new_prio = g_state.net.net_priority;
+                    data_unlock(g_state);
+
+                    // Re-apply power config (e.g. disable/enable WiFi radio accordingly)
+                    wifi_manager_set_power(new_prio == 0);
+
+                    Serial.printf("\n>>> Network Priority changed to: %s <<<\n", new_prio == 0 ? "WIFI" : "LAN (Ethernet)");
+                    if (new_prio == 1) {
+                        Serial.println("(Ethernet controller is initializing in the background...)\n");
+                    }
+                    serial_cli_print_menu();
+                } else {
+                    SerialLogMode target_mode = (SerialLogMode)(c - '0');
+                    if (target_mode == LOG_SILENT) {
+                        g_serial_log_mode = LOG_SILENT;
+                        Serial.println("\n>>> Silent Mode Enabled <<<");
+                        serial_cli_print_menu();
+                    } else {
+                        g_serial_log_mode = target_mode;
+                        Serial.printf("\n>>> Log Mode changed to: %s <<<\n", serial_log_mode_name(target_mode));
+                        Serial.println("(Press [Enter] or '0' to return to Main Menu)\n");
+                    }
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
@@ -929,6 +1118,7 @@ void setup() {
     xTaskCreatePinnedToCore(Task_Net,   "Task_Net",   8192,  NULL, 1, NULL, 0);
     xTaskCreatePinnedToCore(Task_Touch, "Task_Touch", 4096,  NULL, 1, NULL, 1);
     xTaskCreatePinnedToCore(Task_UI,    "Task_UI",    16384, NULL, 4, NULL, 1);
+    xTaskCreatePinnedToCore(Task_SerialCLI, "Serial_CLI", 4096,  NULL, 1, NULL, 1);
 }
 
 void loop() {

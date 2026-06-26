@@ -8,6 +8,8 @@
 #include <string.h>
 #include <strings.h>
 
+#define Serial if (g_serial_log_mode == LOG_RS485) Serial
+
 static HardwareSerial rs485_serial(RS485_UART_NUM);
 static DFRobot_RTU rs485_modbus(&rs485_serial, RS485_DIR_PIN);
 
@@ -2414,48 +2416,7 @@ static void rs485_debug_process_line(char* line) {
 }
 
 static void rs485_debug_serial_loop() {
-    while (Serial.available()) {
-        char c = (char)Serial.read();
-
-        if ((c == 'k' || c == 'K') && debug_line_len == 0) {
-            screens_set(SCREEN_TOUCH_TEST);
-            Serial.println("[TC] Touch alignment test opened.");
-            continue;
-        }
-
-        if ((c == 'b' || c == 'B') && debug_line_len == 0) {
-            screens_set(SCREEN_DASHBOARD);
-            Serial.println("[TC] Returned to dashboard.");
-            continue;
-        }
-
-        if ((c == 'd' || c == 'D') && debug_line_len == 0) {
-            data_lock(g_state);
-            g_state.sensor.data_collect_mode = !g_state.sensor.data_collect_mode;
-            bool current_mode = g_state.sensor.data_collect_mode;
-            data_unlock(g_state);
-            data_save_device_config(g_state);
-            Serial.printf("[SYSTEM] Mode Ambil Data: %s\n", current_mode ? "AKTIF (Kirim 10s)" : "NON-AKTIF (Mode Biasa)");
-            continue;
-        }
-
-        if (c == '\r') continue;
-        if (c == '\n') {
-            debug_line[debug_line_len] = '\0';
-            rs485_debug_process_line(debug_line);
-            debug_line_len = 0;
-            debug_line[0] = '\0';
-            continue;
-        }
-
-        if (debug_line_len < sizeof(debug_line) - 1) {
-            debug_line[debug_line_len++] = c;
-        } else {
-            debug_line_len = 0;
-            debug_line[0] = '\0';
-            Serial.println("[RS485DBG] command too long");
-        }
-    }
+    // Empty - CLI handled by Task_SerialCLI in main.cpp
 }
 
 static void rs485_poll_one_slave() {

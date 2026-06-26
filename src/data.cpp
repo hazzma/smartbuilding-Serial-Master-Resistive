@@ -122,6 +122,7 @@ DeviceProfile device_profile_from_capabilities(uint16_t capability) {
 void data_init(BuildingState& state) {
     state.mutex = xSemaphoreCreateMutex();
     state.use_dummy = false;
+    state.net.lan_mac_spoof = false;
     state.ui_needs_update = true;
     state.last_data_ts = millis();
 
@@ -682,3 +683,5 @@ void data_lock(BuildingState& state) {
 void data_unlock(BuildingState& state) {
     xSemaphoreGive(state.mutex);
 }
+
+SerialLogMode g_serial_log_mode = LOG_SILENT;

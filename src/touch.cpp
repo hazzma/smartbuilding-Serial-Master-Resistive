@@ -65,11 +65,13 @@ static void touch_probe_direct_spi() {
     lgfx::spi::endTransaction(SPI3_HOST);
     if (bus_mutex) xSemaphoreGive(bus_mutex);
 
-    Serial.printf("[TC][PROBE] direct SPI MISO:%d X:%u Y:%u Z1:%u Z2:%u\n",
-                  miso_idle, x, y, z1, z2);
-    if ((x == 0 && y == 0 && z1 == 0 && z2 == 0) ||
-        (x == 4095 && y == 4095 && z1 == 4095 && z2 == 4095)) {
-        Serial.println("[TC][PROBE][ERROR] MISO response is stuck; check T_DO wiring, T_CS wiring, power, and controller type.");
+    if (g_serial_log_mode == LOG_CALIB) {
+        Serial.printf("[TC][PROBE] direct SPI MISO:%d X:%u Y:%u Z1:%u Z2:%u\n",
+                      miso_idle, x, y, z1, z2);
+        if ((x == 0 && y == 0 && z1 == 0 && z2 == 0) ||
+            (x == 4095 && y == 4095 && z1 == 4095 && z2 == 4095)) {
+            Serial.println("[TC][PROBE][ERROR] MISO response is stuck; check T_DO wiring, T_CS wiring, power, and controller type.");
+        }
     }
 }
 
@@ -87,10 +89,12 @@ static void touch_test_cs_pin() {
     digitalWrite(TOUCH_CS, HIGH);
     touch_cs_output_ok = high_read == HIGH && low_read == LOW;
 
-    Serial.printf("[TC][DIAG] CS GPIO%d output test: HIGH read=%d, LOW read=%d => %s\n",
-                  TOUCH_CS, high_read, low_read, touch_cs_output_ok ? "PASS" : "FAIL");
-    if (!touch_cs_output_ok) {
-        Serial.println("[TC][ERROR] XPT2046 CS cannot be driven HIGH/LOW; check pin capability and wiring.");
+    if (g_serial_log_mode == LOG_CALIB) {
+        Serial.printf("[TC][DIAG] CS GPIO%d output test: HIGH read=%d, LOW read=%d => %s\n",
+                      TOUCH_CS, high_read, low_read, touch_cs_output_ok ? "PASS" : "FAIL");
+        if (!touch_cs_output_ok) {
+            Serial.println("[TC][ERROR] XPT2046 CS cannot be driven HIGH/LOW; check pin capability and wiring.");
+        }
     }
 }
 
@@ -144,13 +148,17 @@ static bool touch_read_current(int &tx, int &ty, bool &pressed) {
     uint32_t now = millis();
     if (raw_count && now - last_raw_log_ts >= 100) {
         last_raw_log_ts = now;
-        Serial.printf("[TC][RAW] x:%d y:%d pressure:%u | mapped:%ld,%ld pressed:%s\n",
-                      raw.x, raw.y, raw.size, (long)x, (long)y, pressed ? "YES" : "NO");
+        if (g_serial_log_mode == LOG_CALIB) {
+            Serial.printf("[TC][RAW] x:%d y:%d pressure:%u | mapped:%ld,%ld pressed:%s\n",
+                          raw.x, raw.y, raw.size, (long)x, (long)y, pressed ? "YES" : "NO");
+        }
     } else if (!raw_count && now - last_diag_ts >= 2000) {
         last_diag_ts = now;
-        Serial.printf("[TC][DIAG] No valid XPT2046 touch sample | CS output:%s GPIO%d level:%d\n",
-                      touch_cs_output_ok ? "PASS" : "FAIL", TOUCH_CS, digitalRead(TOUCH_CS));
-        touch_probe_direct_spi();
+        if (g_serial_log_mode == LOG_CALIB) {
+            Serial.printf("[TC][DIAG] No valid XPT2046 touch sample | CS output:%s GPIO%d level:%d\n",
+                          touch_cs_output_ok ? "PASS" : "FAIL", TOUCH_CS, digitalRead(TOUCH_CS));
+            touch_probe_direct_spi();
+        }
     }
 
     static bool last_pressed_state = false;
