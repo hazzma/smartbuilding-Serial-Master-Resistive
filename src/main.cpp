@@ -373,10 +373,32 @@ void Task_Net(void* pvParameters) {
                                  (uint32_t)timeinfo.tm_mday;
                 uint16_t minute_now = (uint16_t)timeinfo.tm_hour * 60U + (uint16_t)timeinfo.tm_min;
 
-                // --- MIDNIGHT ROLLOVER: update today's cached session bitmask ---
                 static int last_day = -1;
                 if (last_day == -1) {
                     last_day = timeinfo.tm_mday;
+                    
+                    // Re-cache today's sessions on startup/sync
+                    uint8_t today_idx = schedule_get_day_of_week();
+                    if (today_idx < SCHEDULE_DAYS && g_state.sensor.sched_weekly.valid) {
+                        g_state.sensor.sched_today_sessions_bitmask = g_state.sensor.sched_weekly.day_mask[today_idx];
+                        g_state.sensor.sched_active_session_count = 0;
+                        memset(g_state.sensor.sched_active_sessions, 0, sizeof(g_state.sensor.sched_active_sessions));
+                        for (uint8_t s = 0; s < SCHEDULE_SESSION_COUNT; s++) {
+                            bool active = (g_state.sensor.sched_today_sessions_bitmask & (1 << s)) != 0;
+                            g_state.sensor.sched_active_sessions[s] = active;
+                            if (active) g_state.sensor.sched_active_session_count++;
+                        }
+                        g_state.sensor.sched_last_triggered_min = 0;
+                        g_state.sensor.sched_retry_pending = false;
+                        g_state.sensor.sched_retry_check_ms = 0;
+                        g_state.sensor.sched_retry_session = 0;
+                        g_state.sensor.sched_pre_start_triggered_mask = 0;
+                        g_state.sensor.sched_start_triggered_mask = 0;
+                        Serial.printf("[Schedule] Startup refresh: today=%s bitmask=%02X sessions=%u\n",
+                                      schedule_get_day_name(today_idx),
+                                      g_state.sensor.sched_today_sessions_bitmask,
+                                      g_state.sensor.sched_active_session_count);
+                    }
                 } else if (timeinfo.tm_mday != last_day) {
                     last_day = timeinfo.tm_mday;
 

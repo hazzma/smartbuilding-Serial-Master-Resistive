@@ -175,18 +175,8 @@ static void auto_assign_room_lux_locked(BuildingState& state) {
         lux_mapping.manual_override = false;
     }
 
-    // Auto-heal: Ensure non-IR nodes with hardware Lux capability have it enabled in enabled_mask
     uint8_t count = state.rs485.slave_count;
     if (count > RS485_MAX_SLAVES) count = RS485_MAX_SLAVES;
-    for (uint8_t i = 0; i < count; i++) {
-        RS485SlaveState& slave = state.rs485.slaves[i];
-        if (slave.online && (slave.capability & CAP_LUX)) {
-            if (!is_ir_node(slave) && !(slave.enabled_mask & CAP_LUX)) {
-                slave.enabled_mask |= CAP_LUX;
-                if (slave.lux_count == 0) slave.lux_count = 1;
-            }
-        }
-    }
 
     if (lux_mapping.assigned || lux_mapping.manual_override) return;
 
@@ -228,15 +218,46 @@ static void compose_dashboard_locked(BuildingState& state) {
         next.co2_valid = true;
     }
 
-    const LogicalMapping& lux_mapping = state.rs485.mappings[LOGICAL_LUX_MAIN];
-    RS485SlaveState* lux_slave = lux_mapping.assigned ? find_slave_by_mapping_locked(state, lux_mapping) : nullptr;
-    bool is_ir_slave = lux_slave && is_ir_node(*lux_slave);
-    if (lux_slave && !is_ir_slave &&
-        slave_has_enabled_capability(*lux_slave, CAP_LUX) && lux_slave->lux_valid) {
-        next.lux = lux_slave->lux;
+    float lux_sum = 0.0f;
+    uint32_t lux_valid_count = 0;
+    float sum_channels[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    uint32_t count_channels[4] = {0, 0, 0, 0};
+
+    uint8_t slave_count = state.rs485.slave_count;
+    if (slave_count > RS485_MAX_SLAVES) slave_count = RS485_MAX_SLAVES;
+    for (uint8_t i = 0; i < slave_count; i++) {
+        const RS485SlaveState& slave = state.rs485.slaves[i];
+        if (slave.online && !is_ir_node(slave) &&
+            slave_has_enabled_capability(slave, CAP_LUX) && slave.lux_valid) {
+            lux_sum += slave.lux;
+            lux_valid_count++;
+
+            for (uint8_t ch = 0; ch < 4; ch++) {
+                if (slave.lux_channel_valid[ch]) {
+                    sum_channels[ch] += slave.lux_channel[ch];
+                    count_channels[ch]++;
+                }
+            }
+        }
+    }
+
+    if (lux_valid_count > 0) {
+        next.lux = lux_sum / lux_valid_count;
         next.lux_valid = true;
-        memcpy(next.lux_channel, lux_slave->lux_channel, sizeof(next.lux_channel));
-        memcpy(next.lux_channel_valid, lux_slave->lux_channel_valid, sizeof(next.lux_channel_valid));
+        for (uint8_t ch = 0; ch < 4; ch++) {
+            if (count_channels[ch] > 0) {
+                next.lux_channel[ch] = sum_channels[ch] / count_channels[ch];
+                next.lux_channel_valid[ch] = true;
+            } else {
+                next.lux_channel[ch] = 0.0f;
+                next.lux_channel_valid[ch] = false;
+            }
+        }
+    } else {
+        next.lux = -1.0f;
+        next.lux_valid = false;
+        memset(next.lux_channel, 0, sizeof(next.lux_channel));
+        memset(next.lux_channel_valid, 0, sizeof(next.lux_channel_valid));
     }
     state.sensor.lux = next.lux_valid ? next.lux : -1.0f; // Synchronize legacy state
 

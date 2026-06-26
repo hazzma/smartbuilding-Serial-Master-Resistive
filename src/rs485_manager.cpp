@@ -1361,7 +1361,6 @@ static void rs485_update_sensors_from_block(uint8_t address,
                 memcpy(g_state.rs485.slaves[slave_index].lux_channel, lux_channels, sizeof(lux_channels));
                 memcpy(g_state.rs485.slaves[slave_index].lux_channel_valid, lux_channel_valid, sizeof(lux_channel_valid));
             }
-            g_state.sensor.lux = lux;
         } else if (slave_index < RS485_MAX_SLAVES) {
             g_state.rs485.slaves[slave_index].lux_valid = false;
             memset(g_state.rs485.slaves[slave_index].lux_channel_valid, 0, sizeof(g_state.rs485.slaves[slave_index].lux_channel_valid));
