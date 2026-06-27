@@ -2638,14 +2638,14 @@ static void rs485_handle_projector_verification() {
     if (g_state.sensor.proj_verif_state == 6 &&
         g_state.sensor.proj_warning_until_ms != 0 &&
         (int32_t)(millis() - g_state.sensor.proj_warning_until_ms) >= 0) {
-        g_state.sensor.proj_verif_state = 0; // Transition to OFF
-        g_state.sensor.projector_on = false; // Turn OFF
-        g_state.sensor.proj_hardware_failed = false;
+        g_state.sensor.proj_verif_state = 0; // Transition back to state 0 (OFF)
+        g_state.sensor.projector_on = false; // Force projector_on = false
+        g_state.sensor.proj_hardware_failed = false; // Reset errors
         g_state.sensor.proj_warning_until_ms = 0;
         g_state.ui_needs_update = true;
-        Serial.println("[Projector] Warning timeout. Verification failed, turning OFF.");
+        Serial.println("[Projector] Warning timeout. Verification failed, turning OFF and resetting errors.");
         data_unlock(g_state);
-        mqtt_publish_state();  // Notify app projector is now OFF
+        mqtt_publish_state();  // Notify app projector is OFF
         data_lock(g_state);
     }
 

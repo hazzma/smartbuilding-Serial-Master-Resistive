@@ -227,7 +227,8 @@ static void compose_dashboard_locked(BuildingState& state) {
     if (slave_count > RS485_MAX_SLAVES) slave_count = RS485_MAX_SLAVES;
     for (uint8_t i = 0; i < slave_count; i++) {
         const RS485SlaveState& slave = state.rs485.slaves[i];
-        if (slave.online && !is_ir_node(slave) &&
+        bool is_projector_slave = mapping_matches_slave(state.rs485.mappings[LOGICAL_PROJECTOR_CONTROL], slave);
+        if (slave.online && !is_projector_slave && !is_ir_node(slave) &&
             slave_has_enabled_capability(slave, CAP_LUX) && slave.lux_valid) {
             lux_sum += slave.lux;
             lux_valid_count++;

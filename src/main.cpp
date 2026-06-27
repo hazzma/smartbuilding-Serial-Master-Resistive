@@ -25,7 +25,7 @@ static const float    AC_PERFORMANCE_MIN_DROP_C           = 1.0f;   // 1°C
 static const float    AC_PERFORMANCE_ESCALATE_THRESHOLD_C = 0.1f;   // "no change" threshold
 static const float    AC_PERFORMANCE_TARGET_RESET_DELTA_C = 0.5f;
 static const uint32_t AUTO_OFF_DELAY_MS                   = 5UL * 60UL * 1000UL; // 5 min
-static const uint32_t LED_CHECK_WINDOW_MS                 = 2UL * 60UL * 1000UL; // 2 min
+static const uint32_t LED_CHECK_WINDOW_MS                 = 15UL * 1000UL; // 15 sec
 static const float    LED_CHECK_MIN_DELTA_LUX             = 50.0f;
 static const uint8_t  PRECLASS_FAN_SPEED                  = 1;  // Low
 
@@ -679,46 +679,54 @@ void Task_Net(void* pvParameters) {
                 }
 
                 // --- LED LUX CHECK: Detect dead/missing light tube ---
-                // If light_on transitions false→true, snapshot lux baseline.
-                // After 2 minutes, if lux didn't rise ≥50lx → warning.
+                // After 15s warmup, if lux < 50lx → CHK LAMP warning.
+                // Warning clears immediately when lux rises back to >= 50lx.
+                // No baseline comparison — absolute threshold only.
                 {
                     static bool prev_light_on_lux = false;
+                    static bool led_check_warmup_done = false;
                     bool light_now = g_state.sensor.light_on;
+
                     if (!prev_light_on_lux && light_now) {
-                        // Light just turned ON — capture baseline
-                        g_state.sensor.led_check_baseline_lux = g_state.rs485.dashboard.lux_valid
-                            ? g_state.rs485.dashboard.lux : -1.0f;
+                        // Light just turned ON — start warmup window, clear any old warning
                         g_state.sensor.led_check_start_ms = millis();
+                        led_check_warmup_done = false;
                         if (g_state.sensor.led_check_warning) {
                             g_state.sensor.led_check_warning = false;
                             trigger_led_warning_changed = true;
                         }
-                        Serial.printf("[LED Check] Light ON — baseline lux=%.1f\n",
-                                      g_state.sensor.led_check_baseline_lux);
-                    } else if (!light_now && g_state.sensor.led_check_warning) {
-                        // Light turned OFF — clear warning
+                        Serial.println("[LED Check] Light ON — 15s warmup started.");
+                    } else if (!light_now && prev_light_on_lux) {
+                        // Light turned OFF — clear warning & reset
+                        bool was_warning = g_state.sensor.led_check_warning;
                         g_state.sensor.led_check_warning = false;
                         g_state.sensor.led_check_start_ms = 0;
-                        g_state.sensor.led_check_baseline_lux = -1.0f;
-                        trigger_led_warning_changed = true;
-                        g_state.ui_needs_update = true;
-                        Serial.println("[LED Check] Light OFF — warning cleared");
-                    } else if (light_now && !g_state.sensor.led_check_warning &&
-                               g_state.sensor.led_check_start_ms != 0 &&
-                               (millis() - g_state.sensor.led_check_start_ms) >= LED_CHECK_WINDOW_MS) {
-                        // 2-minute window expired — evaluate
-                        if (g_state.rs485.dashboard.lux_valid && g_state.sensor.led_check_baseline_lux >= 0.0f) {
-                            float delta = g_state.rs485.dashboard.lux - g_state.sensor.led_check_baseline_lux;
-                            if (delta < LED_CHECK_MIN_DELTA_LUX) {
-                                g_state.sensor.led_check_warning = true;
-                                trigger_led_warning_changed = true;
-                                g_state.ui_needs_update = true;
-                                Serial.printf("[LED Check] WARNING — lux delta=%.1f < 50lx threshold\n", delta);
-                            } else {
-                                Serial.printf("[LED Check] OK — lux delta=%.1f\n", delta);
+                        led_check_warmup_done = false;
+                        if (was_warning) {
+                            trigger_led_warning_changed = true;
+                            g_state.ui_needs_update = true;
+                        }
+                        Serial.println("[LED Check] Light OFF — warning cleared.");
+                    } else if (light_now && g_state.sensor.led_check_start_ms != 0) {
+                        if (!led_check_warmup_done) {
+                            if ((millis() - g_state.sensor.led_check_start_ms) >= LED_CHECK_WINDOW_MS) {
+                                led_check_warmup_done = true;
+                                Serial.println("[LED Check] Warmup done. Monitoring lux >= 50lx.");
                             }
                         }
-                        g_state.sensor.led_check_start_ms = 0; // reset so we don't check again this session
+                        if (led_check_warmup_done && g_state.rs485.dashboard.lux_valid) {
+                            // Simple absolute check: lux < 50lx = lamp problem
+                            bool should_warn = (g_state.rs485.dashboard.lux < LED_CHECK_MIN_DELTA_LUX);
+                            if (should_warn != g_state.sensor.led_check_warning) {
+                                g_state.sensor.led_check_warning = should_warn;
+                                trigger_led_warning_changed = true;
+                                g_state.ui_needs_update = true;
+                                Serial.printf("[LED Check] WARNING %s (lux=%.1f, threshold=%.1f)\n",
+                                              should_warn ? "ACTIVE" : "CLEARED",
+                                              g_state.rs485.dashboard.lux,
+                                              LED_CHECK_MIN_DELTA_LUX);
+                            }
+                        }
                     }
                     prev_light_on_lux = light_now;
                 }

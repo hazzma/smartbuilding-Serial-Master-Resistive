@@ -239,6 +239,7 @@ struct DashboardUiModel {
     DashboardLayoutMode layout;
     uint8_t proj_verif_state;
     bool proj_hw_fail;
+    bool led_check_warning;
 };
 
 static bool rs485_has_online_slave(const RS485State& rs485) {
@@ -314,6 +315,7 @@ static DashboardUiModel dashboard_make_ui_model(const BuildingState& state) {
                                            model.has_projector, model.has_led);
     model.proj_verif_state = state.sensor.proj_verif_state;
     model.proj_hw_fail = state.sensor.proj_hardware_failed;
+    model.led_check_warning = state.sensor.led_check_warning;
     return model;
 }
 
@@ -332,14 +334,15 @@ static void dashboard_draw_transparent_temp(float temp) {
 }
 
 static void dashboard_draw_led_widget(int x, int y, int w, int h, const DashboardUiModel& model) {
+    const char* sub = model.led_check_warning ? "CHK LAMP" : nullptr;
     if (model.led_channel_count > 1) {
         int gap = 8;
         int channel_w = (w - gap) / 2;
-        drawLargeControlButton(x, y, channel_w, h, "LED 1", model.led_channel_on[0]);
+        drawLargeControlButton(x, y, channel_w, h, "LED 1", model.led_channel_on[0], sub);
         drawLargeControlButton(x + channel_w + gap, y, w - channel_w - gap, h,
-                               "LED 2", model.led_channel_on[1]);
+                               "LED 2", model.led_channel_on[1], sub);
     } else {
-        drawLargeControlButton(x, y, w, h, "LED 1", model.led_channel_on[0]);
+        drawLargeControlButton(x, y, w, h, "LED 1", model.led_channel_on[0], sub);
     }
 }
 
@@ -1728,16 +1731,8 @@ static void slave_forget_locked(BuildingState& state, uint8_t target_index) {
         mapping.manual_override = false;
     }
 
-    if (count > 1) {
-        for (uint8_t i = target_index; i + 1 < count; i++) {
-            state.rs485.slaves[i] = state.rs485.slaves[i + 1];
-        }
-        slave_reset_empty_slot(state.rs485.slaves[count - 1]);
-        state.rs485.slave_count = count - 1;
-    } else {
-        slave_reset_empty_slot(state.rs485.slaves[0]);
-        state.rs485.slave_count = 1;
-    }
+    // Reset capability selections/configurations but keep address/UID/online/metadata
+    slave_clear_profile_selection(target);
 
     for (uint8_t i = 0; i < 2; i++) {
         state.sensor.slave_online[i] = i < state.rs485.slave_count && state.rs485.slaves[i].online;
@@ -3388,6 +3383,7 @@ void handle_slave_detail_touch(BuildingState& state, int tx, int ty) {
         slave_feature_page = 0;
         data_unlock(state);
         data_save_rs485_config(state);
+        rs485_apply_slave_assignments(target_index);
         screens_set(SCREEN_SLAVE_MANAGER);
         return;
     }

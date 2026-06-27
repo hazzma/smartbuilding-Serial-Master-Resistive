@@ -2427,21 +2427,21 @@ Implementation effect: firmware startup, RS485 recovery, and UI empty-state hand
 The central master unit manages physical automations, diagnostic logic, and failovers using the following algorithms and specific thresholds.
 
 ### 13.22.1 Dead Light Tube Detection (LED Anomaly)
-* **Purpose**: Identifies dead, missing, or heavily degraded lights by monitoring the change in ambient room Lux after turning a light zone on.
-* **Window Duration**: 2 minutes (`LED_CHECK_WINDOW_MS = 120,000 ms`).
-* **Lux Delta Threshold**: 50 lx (`LED_CHECK_MIN_DELTA_LUX = 50.0f`).
+* **Purpose**: Identifies dead, missing, or heavily degraded lights by monitoring the absolute room Lux after turning a light zone on.
+* **Window Duration**: 15 seconds (`LED_CHECK_WINDOW_MS = 15,000 ms`).
+* **Lux Threshold**: 50 lx (`LED_CHECK_MIN_DELTA_LUX = 50.0f`).
 * **Trigger Conditions**:
-  - When a light relay transitions from `OFF` to `ON`, a baseline snapshot of room Lux is captured (`led_check_baseline_lux`). If the current dashboard Lux is invalid, baseline is set to `-1.0f`. The timer starts (`led_check_start_ms = millis()`).
+  - When a light relay transitions from `OFF` to `ON`, the warmup timer starts (`led_check_start_ms = millis()`).
   - If a prior warning was active, it is cleared, and `trigger_led_warning_changed` is set.
 * **Evaluation Logic**:
-  - After 2 minutes, if the light remains ON, Lux is valid, and the baseline is $\ge 0$:
-    - The lux difference is computed: $\Delta Lux = Lux_{current} - Lux_{baseline}$.
-    - If $\Delta Lux < 50.0$ lx, `led_check_warning` is set to `true`.
-  - The check runs once per light activation session.
+  - After 15 seconds warmup, if the light remains ON and the room Lux is valid, the system **continuously** monitors:
+    - If $Lux_{current} < 50.0$ lx, `led_check_warning` is set to `true`.
+    - If the lux subsequently rises back $\ge 50.0$ lx, the warning is automatically and immediately cleared (`led_check_warning = false`).
 * **Clearance Logic**:
-  - When the light transitions from `ON` to `OFF`, any active `led_check_warning` is cleared, and baseline trackers are reset.
-* **Reporting**:
+  - When the light transitions from `ON` to `OFF`, any active `led_check_warning` is cleared, and the warmup tracker is reset.
+* **Reporting & UI representation**:
   - Pushes an alert change to the MQTT alert bitmask (Bit 4 of the 8-bit binary string).
+  - Renders the warning subtext `"CHK LAMP"` on the local TFT display's light/LED widget button.
 
 ### 13.22.2 Projector On/Off Verification & Lux State Machine
 * **Purpose**: Verifies the physical power state of a projector using a light sensor attached directly to the projector lens/output.
@@ -2516,7 +2516,91 @@ The central master unit manages physical automations, diagnostic logic, and fail
 
 ---
 
-## 13.23 Final Engineering Principles
+## 13.23 Non-Volatile Storage (NVS) Preferences Schema
+
+The Master unit persists its hardware profiles, dashboard mappings, network preferences, and daily/weekly schedules in the ESP32 Non-Volatile Storage (NVS) using the Arduino `Preferences` library. The storage is structured under four distinct namespaces.
+
+### 13.23.1 Namespace: `"wifi_cfg"` (WiFi Configuration)
+Manages credentials for WiFi connectivity.
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `ssid` | String | Saved WiFi network SSID. |
+| `pass` | String | Saved WiFi network Password. |
+
+### 13.23.2 Namespace: `"lan_config"` (LAN Configuration)
+Manages static and dynamic configurations for the W5500 Ethernet interface.
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `dhcp` | Boolean | `true` if DHCP is enabled, `false` if static configurations are active. |
+| `static_ip` | String | Static IP address (default: `"192.168.1.177"`). |
+| `gateway` | String | Static network Gateway (default: `"192.168.1.1"`). |
+| `subnet` | String | Static Subnet Mask (default: `"255.255.255.0"`). |
+| `dns` | String | Static DNS Server Address (default: `"8.8.8.8"`). |
+| `mac_spoof` | Boolean | `true` if MAC address spoofing is enabled, `false` to read default base MAC. |
+
+### 13.23.3 Namespace: `"device_cfg"` (Device Parameters & Automations)
+Stores general device identifiers, MQTT connection attributes, daily active histories, and classroom schedules.
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `device_name` | String | Custom device label (default: `"Meeting Room Master"`). |
+| `class_name` | String | Class label associated with the room (default: `"HD01"`). |
+| `mqtt_server` | String | Host address/IP of the MQTT Broker. |
+| `mqtt_port` | UShort | Port of the MQTT Broker. |
+| `mqtt_tls` | Boolean | `true` if SSL/TLS secure connection is enabled. |
+| `mqtt_user` | String | Username for MQTT server authorization. |
+| `mqtt_pass` | String | Password for MQTT server authorization. |
+| `man_time` | Boolean | Manual time override state flag. |
+| `l_day_cnt` | UInt | Counter for days of accumulated lighting records. |
+| `l_acc_sec` | UInt | Light duration today accumulator (seconds). |
+| `al_acc_sec` | UInt | Active load duration today accumulator (seconds). |
+| `l_anom_alrt` | Boolean | Light anomaly alert active state. |
+| `data_coll` | Boolean | Data collection mode status. |
+| `l_hist_0`..`6` | UShort | Daily light history cumulative active minutes (for index `0` to `6`). |
+| `sw_valid` | Boolean | Weekly schedule layout valid flag. |
+| `sw_day0`..`6` | UChar | Weekly session active bitmask (index `0` (Monday) to `6` (Sunday)). |
+| `mq_sch_pay` | String | Last parsed weekly schedule MQTT payload. |
+| `mq_sch_rcv` | Boolean | `true` if schedule payload was received today. |
+| `sched_date` | UInt | Legacy schedule active date (YYYYMMDD). |
+| `sched_count` | UChar | Legacy daily schedule slot count. |
+| `sched_s0`..`4` | UShort | Legacy slot start minute (index `0` to `4`). |
+| `sched_e0`..`4` | UShort | Legacy slot end minute (index `0` to `4`). |
+
+### 13.23.4 Namespace: `"rs485_cfg"` (RS485 Registry & Logical Mappings)
+Saves discovery registry profiles of connected RS485 slaves and active dashboard sensor-actuator mappings.
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `assign_schema` | UChar | Registry schema representation version. |
+| `slave_count` | UChar | Total count of registered slaves. |
+| `s%u_addr` | UChar | Modbus RTU address (for index `%u` from `0` to `RS485_MAX_SLAVES-1`). |
+| `s%u_uid` | ULong | Unique Identifier (UID) of the slave. |
+| `s%u_mac` | ULong64 | MAC address of the slave. |
+| `s%u_prof` | UChar | Hardware profile index (from DeviceProfile enum). |
+| `s%u_cap` | UShort | Modbus-reported hardware capability bits. |
+| `s%u_en` | UShort | Enabled capability bitmask (configured in Master). |
+| `s%u_tc` | UChar | Temperature channels count. |
+| `s%u_tam` | UChar | Temperature channel availability mask. |
+| `s%u_tem` | UChar | Temperature channel enabled mask. |
+| `s%u_cc` | UChar | CO2 channels count. |
+| `s%u_pc` | UChar | Presence channels count. |
+| `s%u_lxc` | UChar | Lux channels count. |
+| `s%u_rc` | UChar | Relay output channels count. |
+| `s%u_ic` | UChar | IR transmitter channels count. |
+| `s%u_lcdc` | UChar | LCD display count. |
+| `s%u_name` | String | Custom device name string. |
+| `s%u_room` | String | Room tag/association string. |
+| `m%u_uid` | ULong | Target mapped slave UID (for index `%u` from `0` to `DASHBOARD_LOGICAL_SLOT_COUNT-1`). |
+| `m%u_addr` | UChar | Target mapped slave Modbus address. |
+| `m%u_ch` | UChar | Mapped channel index of the slave. |
+| `m%u_asg` | Boolean | `true` if this logical slot mapping is assigned. |
+| `m%u_man` | Boolean | `true` if mapping was overridden manually. |
+
+---
+
+## 13.24 Final Engineering Principles
 
 1. Dashboard SHALL NOT hardcode slave address.
 2. Dashboard SHALL use logical slot abstraction.
