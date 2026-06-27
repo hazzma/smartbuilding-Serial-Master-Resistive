@@ -1499,8 +1499,6 @@ Class topic effect:
 - [x] Add DISCOVER button to request RS485 pairing mode and pause polling.
 - [x] Implement RS485 pairing candidate display from Modbus pairing address `247`.
 - [x] Persist paired slave registry and dashboard mapping seed data in NVS.
-- [ ] Firebase Sync - Sinkronisasi state gedung ke Firebase Realtime Database.
-- [ ] Add advanced slave detail/control screens.
 
 ---
 
@@ -2424,7 +2422,101 @@ Implementation effect: firmware startup, RS485 recovery, and UI empty-state hand
 
 ---
 
-## 13.22 Final Engineering Principles
+## 13.22 Core Automation Algorithms and Thresholds
+
+The central master unit manages physical automations, diagnostic logic, and failovers using the following algorithms and specific thresholds.
+
+### 13.22.1 Dead Light Tube Detection (LED Anomaly)
+* **Purpose**: Identifies dead, missing, or heavily degraded lights by monitoring the change in ambient room Lux after turning a light zone on.
+* **Window Duration**: 2 minutes (`LED_CHECK_WINDOW_MS = 120,000 ms`).
+* **Lux Delta Threshold**: 50 lx (`LED_CHECK_MIN_DELTA_LUX = 50.0f`).
+* **Trigger Conditions**:
+  - When a light relay transitions from `OFF` to `ON`, a baseline snapshot of room Lux is captured (`led_check_baseline_lux`). If the current dashboard Lux is invalid, baseline is set to `-1.0f`. The timer starts (`led_check_start_ms = millis()`).
+  - If a prior warning was active, it is cleared, and `trigger_led_warning_changed` is set.
+* **Evaluation Logic**:
+  - After 2 minutes, if the light remains ON, Lux is valid, and the baseline is $\ge 0$:
+    - The lux difference is computed: $\Delta Lux = Lux_{current} - Lux_{baseline}$.
+    - If $\Delta Lux < 50.0$ lx, `led_check_warning` is set to `true`.
+  - The check runs once per light activation session.
+* **Clearance Logic**:
+  - When the light transitions from `ON` to `OFF`, any active `led_check_warning` is cleared, and baseline trackers are reset.
+* **Reporting**:
+  - Pushes an alert change to the MQTT alert bitmask (Bit 4 of the 8-bit binary string).
+
+### 13.22.2 Projector On/Off Verification & Lux State Machine
+* **Purpose**: Verifies the physical power state of a projector using a light sensor attached directly to the projector lens/output.
+* **Slave Association**: Monitored via the slave assigned to `LOGICAL_PROJECTOR_CONTROL`.
+* **State Machine (`proj_verif_state`)**:
+  - `0`: OFF
+  - `1`: POWERING_ON (warmup phase)
+  - `2`: VERIFIED_ON
+  - `3`: RETRYING (second attempt warmup phase)
+  - `4`: NO_LUX (lux optional disabled or sensor invalid)
+  - `5`: CHECK_LUX (partially verified; at least one channel verified but some warning/offline)
+  - `6`: CHECK_PROJECTOR (verification failed after retry; keeps state ON but sets warning)
+* **Warmup & Warning Thresholds**:
+  - **Warmup Duration**: 80 seconds (`proj_warmup_timer_ms = 80,000 ms`) for both initial try and retry.
+  - **Warning Expiry**: 10 seconds (`proj_warning_until_ms = 10,000 ms`) in state 6.
+  - **Lux Baseline EMA**: $Baseline_{new} = 0.90 \times Baseline_{old} + 0.10 \times Lux_{current}$ (updated continuously when proyektor is OFF).
+* **Verification Criteria (per channel)**:
+  - Lux difference: $\Delta Lux = Lux_{current} - Lux_{baseline}$
+  - Lux dynamic threshold: $Threshold_{Lux} = Baseline_{lux} \times 0.20$ (bounded: minimum 20.0 lx, maximum 80.0 lx).
+  - Lux ratio: $Ratio = Lux_{current} / Baseline_{lux}$.
+  - A channel is verified if:
+    - $\Delta Lux \ge Threshold_{Lux}$ OR ($Ratio \ge 1.25$ AND $\Delta Lux \ge 15.0$ lx).
+* **Automation Workflow**:
+  - On turn ON: If baseline is available, state becomes 1 (warmup for 80s). If no baseline, state becomes 4 (NO_LUX).
+  - During warmup: If $\ge 1$ channel is verified, state transitions to 2 (or 5 if some channels have warnings/errors).
+  - Warmup timeout: If 80s expires with zero verified channels:
+    - If in state 1: transitions to state 3 (RETRYING), triggers another 80s warmup, and re-sends the Modbus IR code.
+    - If in state 3: transitions to state 6 (CHECK_PROJECTOR) and sets `proj_hardware_failed = true`.
+  - Auto-Recovery: If warning expiry (10s) in state 6 passes, the system forces `projector_on = false`, transitions back to state 0, and resets errors.
+
+### 13.22.3 CO2 Diagnostic Thresholds
+* **Purpose**: Displays indoor air quality warnings and alarms based on CO2 concentrations.
+* **Alert Levels**:
+  - **CO2 $\ge$ 4000 ppm**: Severe Danger/Alarm. Renders values and status circle in **Red** (`COLOR_STAT_ERR`).
+  - **CO2 $>$ 1000 ppm**: Moderate Warning. Renders values in **Yellow/Orange** (`COLOR_STAT_WARN`).
+  - **CO2 $\le$ 1000 ppm**: Normal. Renders values in **Green** (`COLOR_STAT_ON`).
+  - **CO2 == -1**: Offline/invalid. Displays **"NULL"** in **Gray**.
+* **Diagnostic Fail-safe**: If no RS485 communication is received from the slave for 10 seconds, CO2 is invalidated (`-1`), and `co2_error` (Bit 1) is enabled in the MQTT alert payload.
+
+### 13.22.4 AC Performance Monitoring & Fan Escalation
+* **Purpose**: Detects AC cooling failures and automatically escalates fan speeds to maximize heat exchange.
+* **Activation Thresholds**:
+  - AC must be ON (`ac_on`), AC controller must be available, average temperature must be valid.
+  - Initial gap: Room temperature must be $\ge$ target temperature + 2.0°C (`AC_PERFORMANCE_MIN_START_GAP_C`).
+* **Reset/Cancellation Delta**: If the target temperature is changed by $\ge$ 0.5°C (`AC_PERFORMANCE_TARGET_RESET_DELTA_C`) or AC is turned OFF, the monitor resets.
+* **Evaluation Window**: 10 minutes (`AC_PERFORMANCE_WINDOW_MS = 600,000 ms`).
+* **Performance Limits**:
+  - **AC Degradation Warning**: If room temperature drop in 10 minutes is less than 1.0°C ($\Delta Temp < 1.0^\circ\text{C}$), `ac_performance_warning` is set to `true` (publishes alert Bit 6).
+  - **Fan Escalation**: If room temperature drop in 10 minutes is less than 0.1°C ($\Delta Temp < 0.1^\circ\text{C}$):
+    - Automatically overrides fan speed to `3` (MAX).
+    - Sets `ac_fan_escalated = true` and transmits the write command immediately via RS485.
+  - The rolling window restarts every 10 minutes, using the current temperature as the new baseline, while any warning/escalation state persists until AC power cycle or target reset.
+
+### 13.22.5 Network Connectivity & Reconnect Loop
+* **Purpose**: Manages dual-link (WiFi and LAN) connectivity, DHCP leases, and scan safety.
+* **Priority Handling (`net_priority`)**:
+  - Priority `0` (WiFi): WiFi powered ON.
+  - Priority `1` (LAN): WiFi powered OFF (to save resources, deferred if a scan is active).
+* **WiFi Reconnect and DHCP Guard**:
+  - Connection attempts have a 15-second timeout (`WIFI_CONNECT_TIMEOUT_MS`).
+  - If WiFi is connected (`WL_CONNECTED`) but the IP is `0.0.0.0` for >15 seconds, it disconnects, increments the retry counter, and restarts the connection.
+  - If a valid IP is lost at runtime, it forces an immediate reconnect.
+* **WiFi Scan Safety**:
+  - Active connection attempts are paused during a scan.
+  - Automatically invokes a **blocking scan** (`WiFi.scanNetworks(false, true)`) which blocks the network task for 3–6 seconds. This prevents radio driver collisions/crashes present in ESP-IDF v4.4.6.
+* **LAN Controller (W5500 via HSPI/SPI2)**:
+  - Pinned to Core 0 (`Task_LAN` priority 1) to isolate latency from the UI thread (Core 1).
+  - **MAC Spoofing**: If enabled, uses Lab MAC `00:50:56:C0:00:01`, otherwise reads the ESP32 Base MAC.
+  - **DHCP Fallback**: Tries DHCP lease. If failed, falls back immediately to static NVS config (static IP, gateway, subnet, DNS).
+  - **Link Loss Recovery**: Checks link status every 2 seconds. If link is ON but IP is 0.0.0.0, triggers a full Ethernet reset.
+  - **Internet Access Ping**: Resolves `google.com` every 30 seconds to toggle between "Internet Access OK" and "Local Only (No Internet)".
+
+---
+
+## 13.23 Final Engineering Principles
 
 1. Dashboard SHALL NOT hardcode slave address.
 2. Dashboard SHALL use logical slot abstraction.

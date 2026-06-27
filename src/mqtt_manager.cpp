@@ -428,7 +428,7 @@ static void mqtt_publish_v2_state(uint16_t flags) {
     char led_payload[8];
     char ac_payload[12];
     char projector_payload[8];
-    char alert_payload[8];
+    char alert_payload[16];
     bool room_lux_valid = false;
 
     data_lock(g_state);
@@ -498,7 +498,8 @@ static void mqtt_publish_v2_state(uint16_t flags) {
     bool temp_error = (valid_temp == 0);
     bool co2_error = !g_state.rs485.dashboard.co2_valid;
     bool lux_error = !g_state.rs485.dashboard.lux_valid;
-    bool human_error = !g_state.rs485.dashboard.human_presence_valid;
+    bool human_error = g_state.rs485.mappings[LOGICAL_HUMAN_PRESENCE_MAIN].assigned &&
+                       !g_state.rs485.dashboard.human_presence_valid;
     bool led_error = g_state.sensor.led_check_warning ||
                      g_state.rs485.light_command_failed ||
                      (!g_state.rs485.bus_ok && light_id > 1);
