@@ -3911,13 +3911,17 @@ void render_clock_setup(BuildingState& state) {
 }
 
 void handle_clock_setup_touch(BuildingState& state, int tx, int ty) {
+    Serial.printf("[CLOCK_SETUP] Touch event X:%d Y:%d | clock_setup_manual_mode=%d\n", tx, ty, clock_setup_manual_mode);
+
     if (isHit(tx, ty, 338, 8, 122, 38) || isHit(tx, ty, 20, 126, 180, 48)) {
+        Serial.println("[CLOCK_SETUP] BACK/CANCEL button clicked");
         screens_set(SCREEN_SETTINGS);
         return;
     }
 
     if (isHit(tx, ty, 20, 58, 180, 48)) {
         clock_setup_manual_mode = !clock_setup_manual_mode;
+        Serial.printf("[CLOCK_SETUP] MODE toggled to: %s\n", clock_setup_manual_mode ? "MANUAL" : "NTP");
         data_lock(state);
         state.ui_needs_update = true;
         data_unlock(state);
@@ -3925,6 +3929,7 @@ void handle_clock_setup_touch(BuildingState& state, int tx, int ty) {
     }
 
     if (isHit(tx, ty, 20, 194, 180, 48)) {
+        Serial.printf("[CLOCK_SETUP] SAVE clicked. Writing use_manual_time = %d\n", clock_setup_manual_mode);
         data_lock(state);
         state.net.use_manual_time = clock_setup_manual_mode;
         state.ui_needs_update = true;

@@ -3,6 +3,11 @@
 #include <WiFiClientSecure.h>
 #include <Ethernet.h>
 #include <PubSubClient.h>
+// --- ESP_SSLClient Configuration (Must be before header inclusion) ---
+#define ENABLE_DEBUG
+#define ENABLE_ERROR_STRING
+#define DEBUG_PORT Serial
+#include <ESP_SSLClient.h>
 #include <ArduinoJson.h>
 #include <ctype.h>
 #include <time.h>
@@ -31,6 +36,7 @@ static const uint32_t MQTT_TEMP_BURST_DURATION_MS = 5UL * 60UL * 1000UL;
 WiFiClientSecure secureClient;
 WiFiClient       wifiClient;
 EthernetClient   ethClient;
+ESP_SSLClient    lanSecureClient;
 PubSubClient     mqttClient;
 
 static char mqtt_publish_payload[4096];
@@ -1061,6 +1067,10 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
 
 void mqtt_init() {
     secureClient.setInsecure();
+    lanSecureClient.setClient(&ethClient);
+    lanSecureClient.setInsecure();
+    lanSecureClient.setBufferSizes(16384, 2048);
+    lanSecureClient.setDebugLevel(1); // Error only
     mqttClient.setCallback(mqtt_callback);
     mqttClient.setBufferSize(4096);
 }
@@ -1114,10 +1124,15 @@ static void reconnect() {
         data_unlock(g_state);
 
         if (g_state.net.net_priority == 1 && g_state.net.lan_connected) {
-            if (use_tls) mqttClient.setClient(secureClient);
-            else mqttClient.setClient(ethClient);
-            mqttClient.setServer(server, port);
-            Serial.print(use_tls ? "[MQTT] Connecting via LAN (TLS)..." : "[MQTT] Connecting via LAN...");
+            if (use_tls) {
+                mqttClient.setClient(lanSecureClient);
+                mqttClient.setServer(server, port);
+                Serial.printf("[MQTT] Connecting via LAN (TLS, port=%d)...", port);
+            } else {
+                mqttClient.setClient(ethClient);
+                mqttClient.setServer(server, port);
+                Serial.print("[MQTT] Connecting via LAN...");
+            }
         } else if (g_state.net.wifi_connected) {
             if (use_tls) mqttClient.setClient(secureClient);
             else mqttClient.setClient(wifiClient);

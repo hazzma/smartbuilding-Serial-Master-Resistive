@@ -1,7 +1,7 @@
 #include "time_manager.h"
 #include "data.h"
 
-#define Serial if (g_serial_log_mode == LOG_NET) Serial
+#define Serial Serial
 #include <Dns.h>
 #include <sys/time.h>
 
@@ -24,7 +24,7 @@ static uint8_t lan_ntp_fail_count = 0;
 static bool wifi_ntp_started = false;
 static bool rtc_time_valid = false;
 
-static const uint32_t LAN_NTP_RESPONSE_TIMEOUT_MS = 1500;
+static const uint32_t LAN_NTP_RESPONSE_TIMEOUT_MS = 3000;
 static const uint32_t LAN_NTP_RETRY_MS = 15000;
 static const uint32_t NTP_RESYNC_MS = 600000;
 
@@ -95,17 +95,41 @@ static void sendNTPpacket(const IPAddress& address) {
 static bool lan_ntp_resolve(IPAddress& ntp_ip) {
     DNSClient dns;
     dns.begin(Ethernet.dnsServerIP());
-    if (dns.getHostByName(ntpServer, ntp_ip) == 1) return true;
+    
+    const char* ntpServers[] = {
+        "pool.ntp.org",
+        "time.google.com",
+        "time.windows.com"
+    };
 
+    for (int i = 0; i < 3; i++) {
+        if (dns.getHostByName(ntpServers[i], ntp_ip) == 1) {
+            return true;
+        }
+    }
+
+    // Try directly with 8.8.8.8 dns if local dns fails
     dns.begin(IPAddress(8, 8, 8, 8));
-    if (dns.getHostByName(ntpServer, ntp_ip) == 1) return true;
+    for (int i = 0; i < 3; i++) {
+        if (dns.getHostByName(ntpServers[i], ntp_ip) == 1) {
+            return true;
+        }
+    }
 
-    ntp_ip = IPAddress(129, 6, 15, 28); // time.nist.gov fallback
+    // Fallback to Google NTP anycast IP (216.239.35.0)
+    ntp_ip = IPAddress(216, 239, 35, 0); 
     return true;
 }
 
 static void lan_ntp_start() {
+    // Cek link fisik DAN IP valid — jangan kirim UDP jika IP masih 0.0.0.0
+    // (terjadi saat kabel baru dicolok tapi DHCP/static belum selesai)
     if (Ethernet.linkStatus() != LinkON) return;
+    IPAddress myIP = Ethernet.localIP();
+    if (myIP[0] == 0 && myIP[1] == 0 && myIP[2] == 0 && myIP[3] == 0) {
+        Serial.println("[TIME] lan_ntp_start skipped: IP not yet assigned");
+        return;
+    }
 
     last_lan_sync_attempt_ms = millis();
     time_set_status("LAN NTP resolving", "LAN", true, false);
@@ -127,6 +151,7 @@ static void lan_ntp_start() {
                   lan_ntp_ip[0], lan_ntp_ip[1], lan_ntp_ip[2], lan_ntp_ip[3]);
 }
 
+
 static void lan_ntp_poll() {
     if (lan_ntp_state != LanNtpState::WAIT_RESPONSE) return;
 
@@ -138,7 +163,7 @@ static void lan_ntp_poll() {
         unsigned long secsSince1900 = (highWord << 16) | lowWord;
         const unsigned long seventyYears = 2208988800UL;
         unsigned long epoch = secsSince1900 - seventyYears;
-        time_t now = epoch + (7 * 3600);
+        time_t now = epoch; // Set system clock in UTC
         struct timeval tv = { .tv_sec = now, .tv_usec = 0 };
         settimeofday(&tv, NULL);
 
@@ -166,6 +191,18 @@ void time_manager_update() {
     manual = g_state.net.use_manual_time;
     data_unlock(g_state);
 
+    static uint32_t last_debug = 0;
+    if (millis() - last_debug > 2000) {
+        last_debug = millis();
+        bool wifi_connected = WiFi.status() == WL_CONNECTED;
+        IPAddress lan_ip = Ethernet.localIP();
+        bool lan_connected = (Ethernet.linkStatus() == LinkON) && 
+                             (lan_ip[0] != 0 || lan_ip[1] != 0 || lan_ip[2] != 0 || lan_ip[3] != 0);
+        Serial.printf("[TIME_DEBUG] manual=%d, wifi_conn=%d, lan_conn=%d (IP=%d.%d.%d.%d), linkStatus=%d, ntp_state=%d, last_success=%lu\n",
+                      manual, wifi_connected, lan_connected, lan_ip[0], lan_ip[1], lan_ip[2], lan_ip[3],
+                      (int)Ethernet.linkStatus(), (int)lan_ntp_state, last_success_ms);
+    }
+
     static bool last_manual = false;
     if (manual != last_manual) {
         last_manual = manual;
@@ -190,7 +227,10 @@ void time_manager_update() {
     lan_ntp_poll();
 
     bool wifi_connected = WiFi.status() == WL_CONNECTED;
-    bool lan_connected = Ethernet.linkStatus() == LinkON;
+    
+    IPAddress lan_ip = Ethernet.localIP();
+    bool lan_connected = (Ethernet.linkStatus() == LinkON) && 
+                         (lan_ip[0] != 0 || lan_ip[1] != 0 || lan_ip[2] != 0 || lan_ip[3] != 0);
 
     if (!wifi_connected) {
         wifi_ntp_started = false;

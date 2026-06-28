@@ -230,6 +230,21 @@ void Task_Net(void* pvParameters) {
     time_manager_init();
     mqtt_init();
 
+    // Jika prioritas LAN, init W5500 sekali di sini sebelum loop dimulai.
+    // Ini memastikan IP sudah valid sebelum time_manager_update() dan mqtt_loop()
+    // pertama kali dieksekusi — mencegah NTP/MQTT gagal karena IP masih 0.0.0.0.
+    {
+        data_lock(g_state);
+        bool is_lan_prio = (g_state.net.net_priority == 1);
+        data_unlock(g_state);
+        if (is_lan_prio) {
+            lan_init();
+            // Beri jeda singkat setelah init agar W5500 selesai commit state internalnya
+            // dan IP bisa terbaca dengan benar oleh komponen lain (time, mqtt, dll)
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+    }
+
     for (;;) {
         uint32_t now = millis();
         static int last_prio = -1;
@@ -311,8 +326,13 @@ void Task_Net(void* pvParameters) {
             wifi_manager_set_power(current_prio == 0);
         }
 
+        // lan_init() sudah dipanggil satu kali di atas sebelum loop.
+        // lan_loop() menangani reinit otomatis jika kabel dicabut/dipasang ulang.
+        // Baris ini hanya sebagai safety net jika mode berubah ke LAN saat runtime
+        // (misal user switch prioritas dari WiFi ke LAN lewat UI).
         if (current_prio == 1 && !lan_initialized) {
             lan_init();
+            vTaskDelay(pdMS_TO_TICKS(500)); // delay sama seperti di atas untuk stabilitas W5500
         }
 
         wifi_manager_loop();
@@ -837,14 +857,30 @@ void Task_Net(void* pvParameters) {
 
 #undef Serial
         static uint32_t last_hb = 0;
-        if (now - last_hb > 5000) {
+        if (now - last_hb > 2000) {
             last_hb = now;
             if (g_serial_log_mode == LOG_NET) {
-                Serial.printf("[NET] Alive | Prio:%d | MQTT:%s | Heap:%u | Stack:%u\n",
-                              current_prio,
-                              is_mqtt_connected() ? "OK" : "FAIL",
-                              (unsigned)ESP.getFreeHeap(),
-                              (unsigned)uxTaskGetStackHighWaterMark(NULL));
+                char t_str[16];
+                char t_src[16];
+                char t_status[32];
+                bool synced;
+                
+                data_lock(g_state);
+                strncpy(t_str, g_state.net.time_str, sizeof(t_str) - 1);
+                strncpy(t_src, g_state.net.time_source, sizeof(t_src) - 1);
+                strncpy(t_status, g_state.net.time_status, sizeof(t_status) - 1);
+                synced = g_state.net.time_synced;
+                data_unlock(g_state);
+                
+                t_str[sizeof(t_str) - 1] = '\0';
+                t_src[sizeof(t_src) - 1] = '\0';
+                t_status[sizeof(t_status) - 1] = '\0';
+
+                Serial.printf("[NET] Prio:%s | MQTT:%s | NTP Clock:%s (%s) | NTP Status:%s (Synced:%d) | Heap:%u KB\n",
+                              current_prio == 0 ? "WIFI" : "LAN",
+                              is_mqtt_connected() ? "CONNECTED" : "DISCONNECTED",
+                              t_str, t_src, t_status, synced,
+                              (unsigned)(ESP.getFreeHeap() / 1024));
             }
         }
 #define Serial if (g_serial_log_mode == LOG_DATA) Serial
@@ -972,10 +1008,11 @@ void serial_cli_print_menu() {
     Serial.println("[5] Monitor RS485 Modbus Polling Packets");
     Serial.println("[6] Toggle LAN MAC Address (Spoof vs Default)");
     Serial.println("[7] Toggle Network Priority (WiFi vs LAN)");
+    Serial.println("[8] Toggle Clock Mode (NTP vs Manual)");
     Serial.println("[0] Silent Mode (Mute logs)");
     Serial.println("\n[Enter] Redraw Menu");
     Serial.println("==================================================");
-    Serial.print("Enter option (0-7): ");
+    Serial.print("Enter option (0-8): ");
 }
 
 void serial_cli_print_sensor_data() {
@@ -1068,7 +1105,7 @@ void Task_SerialCLI(void* pvParameters) {
                         }
                     }
                 }
-            } else if (c >= '0' && c <= '7') {
+            } else if (c >= '0' && c <= '8') {
                 last_digit_ms = millis();
                 if (c == '6') {
                     data_lock(g_state);

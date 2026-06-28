@@ -169,6 +169,15 @@ own Lux zone and use a persistent `INCONCLUSIVE` state before raising a warning.
 
 ## Patch Notes
 
+### V2.9.3 Secure LAN, NTP, and Clock Failsafe Updates
+
+- **W5500 Secure LAN MQTT (TLS/SSL Port 8883)**: Fully integrated `ESP_SSLClient` to wrap `EthernetClient` for W5500 SPI Ethernet. This enables native secure TLS connections directly to EMQX Serverless on Port 8883, replacing the unencrypted Port 1883 fallback.
+- **Server Name Indication (SNI) Fix**: Configured the MQTT client to connect using the broker's domain string rather than the resolved IP address, which resolves the `rc=5` (Not Authorized) broker connection rejection on virtual-hosted EMQX Serverless clusters.
+- **Robust Multi-Server NTP DNS Failover**: Updated the LAN NTP synchronization logic to sequentially query `pool.ntp.org`, `time.google.com`, and `time.windows.com`. If all DNS lookups fail, it automatically falls back to Google's public NTP Anycast IP (`216.239.35.0`), preventing sync timeouts when local DNS servers are slow or unresponsive.
+- **Double Timezone Offset Fix**: Corrected the system clock assignment in LAN NTP to write the UTC epoch instead of GMT+7 time, letting the ESP32 timezone database apply the +7 hours WIB offset correctly and consistently with WiFi and manual clocks.
+- **Serial CLI Failsafe Option (Option 8)**: Added a new menu option `[8] Toggle Clock Mode (NTP vs Manual)` to the Serial CLI menu and updated `TIME_DEBUG` logs to output real-time coordinate logs for touchscreen debugging.
+- **Global SPI Pin Binding**: Explicitly bound the global `SPI` object to the correct physical W5500 SPI2 pins (`LAN_SCK=12`, `LAN_MISO=13`, `LAN_MOSI=11`, `LAN_CS=10`), ensuring the standard `Ethernet` library functions properly without conflicts.
+
 ### V2.8 Local Schedule and MQTT Timing
 
 - Keeps fast RS485 sensor-block polling while MQTT uses event-driven updates and 5-minute heartbeats.

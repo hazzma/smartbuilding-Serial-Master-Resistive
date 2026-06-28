@@ -117,7 +117,19 @@ void lan_check_internet() {
     DNSClient dns;
     dns.begin(Ethernet.dnsServerIP());
     IPAddress remote_ip;
-    bool has_internet = (dns.getHostByName("google.com", remote_ip) == 1);
+    bool has_internet = false;
+
+    // DNS lookup terlebih dahulu
+    if (dns.getHostByName("google.com", remote_ip) == 1) {
+        // Jika DNS sukses, verifikasi routing internet dengan TCP connect singkat ke port 80 (HTTP)
+        // Ini memastikan gateway dan routing luar benar-benar bekerja (mencegah false-positive cache lokal)
+        EthernetClient client;
+        // Gunakan timeout connect yang singkat agar tidak memblokir task LAN terlalu lama
+        if (client.connect(remote_ip, 80)) {
+            has_internet = true;
+            client.stop();
+        }
+    }
     lan_update_runtime_state(has_internet ? "Internet Access OK" : "Local Only (No Internet)");
 
     data_lock(g_state);
@@ -160,7 +172,7 @@ void lan_init() {
     digitalWrite(LAN_RST, HIGH);
     vTaskDelay(pdMS_TO_TICKS(200));
 
-    lanSPI.begin(LAN_SCK, LAN_MISO, LAN_MOSI, LAN_CS);
+    SPI.begin(LAN_SCK, LAN_MISO, LAN_MOSI, LAN_CS);
     Ethernet.init(LAN_CS);
 
     bool success = false;
@@ -176,10 +188,12 @@ void lan_init() {
         g_state.ui_needs_update = true;
         data_unlock(g_state);
 
-        if (Ethernet.begin(mac, 1500, 500) != 0) {
+        // connectTimeout=12s, responseTimeout=6s — cukup toleran untuk router sibuk.
+        // Nilai lama (1500/500ms) terlalu agresif dan sering false-fallback ke static.
+        if (Ethernet.begin(mac, 12000, 6000) != 0) {
             success = true;
         } else {
-            Serial.println("[LAN] DHCP Failed.");
+            Serial.println("[LAN] DHCP Failed — falling back to static IP.");
             lan_update_runtime_state("DHCP failed, using static fallback");
         }
     }
@@ -194,6 +208,10 @@ void lan_init() {
         dns.fromString(g_state.net.lan_dns);
         data_unlock(g_state);
         Ethernet.begin(mac, ip, dns, gw, sn);
+        // W5500 butuh ~150-250ms untuk commit static IP ke register internalnya.
+        // Tanpa delay ini, Ethernet.localIP() bisa balik 0.0.0.0 di update berikutnya
+        // → lan_connected = false → MQTT tidak mau pakai jalur LAN.
+        vTaskDelay(pdMS_TO_TICKS(300));
     }
 
     lan_update_runtime_state(success ? "DHCP lease acquired" : "Static IP configured");
@@ -260,7 +278,12 @@ void lan_loop() {
 }
 
 bool is_lan_connected() {
-    return Ethernet.linkStatus() == LinkON;
+    // Cek kabel DAN IP valid — konsisten dengan g_state.net.lan_connected.
+    // Sebelumnya hanya cek LinkON (kabel fisik), yang bisa memberikan false-positive
+    // saat static IP belum committed atau DHCP belum selesai.
+    if (Ethernet.linkStatus() != LinkON) return false;
+    IPAddress ip = Ethernet.localIP();
+    return (ip[0] != 0 || ip[1] != 0 || ip[2] != 0 || ip[3] != 0);
 }
 
 void Task_LAN(void* pvParameters) {

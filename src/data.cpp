@@ -684,4 +684,4 @@ void data_unlock(BuildingState& state) {
     xSemaphoreGive(state.mutex);
 }
 
-SerialLogMode g_serial_log_mode = LOG_SILENT;
+SerialLogMode g_serial_log_mode = LOG_NET;
